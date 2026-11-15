@@ -1,0 +1,8 @@
+# Example only. Each node writes this at first boot to
+# /var/lib/raw-node/confirmation.yml and shows it at the console login prompt.
+deb13-vt-a1b2:
+  timestamp: 2026-11-14T13:47:00-05:00
+  ip: 192.0.2.10
+  ip6:
+  user: initial
+  sudo: true

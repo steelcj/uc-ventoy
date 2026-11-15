@@ -1,0 +1,147 @@
+# ventoy-raw-node-config.yml
+#
+# Single configuration file for every Ventoy auto install.
+# Values in `defaults` apply to all targets; a target overrides only what differs.
+# All values below are DUMMY examples.
+
+schema_version: 1
+
+meta:
+  baseline: "ventoy-raw-node-baseline-v0.2.0.md"
+  maintainer: "operator@example.invalid"
+  updated: "2026-11-14"
+
+ventoy:
+  iso_root: "/ISO"
+  answer_file_dir: "/ventoy/answer-files"
+  autosel: null                     # null = always ask at boot which answer file to use
+  timeout: null                     # seconds before autosel applies; null = wait
+
+defaults:
+  node:
+    domain: "home.arpa"
+  localization:
+    locale: "en_CA.UTF-8"
+    keyboard_layout: "us"
+    timezone: "America/Toronto"
+    ntp: true
+  accounts:
+    root:
+      password_hash: "$6$DUMMYSALT$DUMMYROOTHASHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # SENSITIVE
+    initial_user:
+      username: "initial"
+      full_name: "Initial User"
+      password_hash: "$6$DUMMYSALT$DUMMYUSERHASHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # SENSITIVE
+      authorized_keys:
+        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAADUMMYKEYONExxxxxxxxxxxxxxxxxxxxxxxxxxxxxx operator@workstation"
+        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAADUMMYKEYTWOxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx backup@offline"
+  ssh:
+    dropin_dir: "/etc/ssh/sshd_config.d"
+    dropin_file: "10-local-auth.conf"
+    dropin_source: "shared/ssh/10-local-auth.conf"
+  firewall:
+    config_source: "shared/nftables/nftables.conf"
+    service: "nftables"
+  packages:
+    - "nftables"
+    - "python3"
+  storage:
+    mode: "interactive"             # interactive | automatic (automatic needs target_disk)
+    target_disk: null               # e.g. a Ventoy disk variable, once tested
+
+targets:
+  debian-13:
+    enabled: true
+    distribution: "debian"
+    release: "13"
+    installer: "debian-preseed"
+    iso: "debian/debian-13.N.N-amd64-netinst.iso"
+    template: "templates/debian-13-preseed.cfg.j2"
+    answer_file: "debian-13-preseed.cfg"
+    node:
+      hostname: "debian-server"
+    accounts:
+      initial_user:
+        admin_group: "sudo"
+    ssh:
+      service: "ssh"
+    firewall:
+      config_path: "/etc/nftables.conf"
+    packages_extra:
+      - "sudo"
+    installer_options:
+      tasks: ["standard", "ssh-server"]
+      mirror:
+        hostname: "deb.debian.org"
+        directory: "/debian"
+        proxy: ""
+    variants:
+      incus-host:
+        enabled: false              # planned: needs automated partitioning
+        answer_file: "debian-13-incus-host-preseed.cfg"
+        node:
+          hostname: "incus-host"
+        storage:
+          mode: "automatic"
+          incus_pool_partition: "remaining"
+
+  ubuntu-26.04:
+    enabled: true
+    distribution: "ubuntu"
+    release: "26.04"
+    installer: "subiquity-autoinstall"
+    iso: "ubuntu/ubuntu-26.04.N-live-server-amd64.iso"
+    template: "templates/ubuntu-user-data.j2"
+    answer_file: "ubuntu-26.04-user-data"
+    node:
+      hostname: "ubuntu-server"
+    accounts:
+      initial_user:
+        admin_group: "sudo"
+    ssh:
+      service: "ssh.socket"
+    firewall:
+      config_path: "/etc/nftables.conf"
+    installer_options:
+      root_password_form: "list"    # list | quoted-string
+      allow_password_ssh: true
+
+  ubuntu-24.04:
+    enabled: true
+    distribution: "ubuntu"
+    release: "24.04"
+    installer: "subiquity-autoinstall"
+    iso: "ubuntu/ubuntu-24.04.5-live-server-amd64.iso"
+    template: "templates/ubuntu-user-data.j2"
+    answer_file: "ubuntu-24.04-user-data"
+    node:
+      hostname: "ubuntu-server"
+    accounts:
+      initial_user:
+        admin_group: "sudo"
+    ssh:
+      service: "ssh.socket"
+    firewall:
+      config_path: "/etc/nftables.conf"
+    installer_options:
+      root_password_form: "quoted-string"
+      allow_password_ssh: true
+
+  rocky-10:
+    enabled: false                  # not started; values unverified
+    distribution: "rocky"
+    release: "10"
+    installer: "anaconda-kickstart"
+    iso: "rocky/Rocky-10.N-x86_64-minimal.iso"
+    template: "templates/rocky-kickstart.cfg.j2"
+    answer_file: "rocky-10-kickstart.cfg"
+    node:
+      hostname: "rocky-server"
+    accounts:
+      initial_user:
+        admin_group: "wheel"
+    ssh:
+      service: "sshd"
+    firewall:
+      config_path: "/etc/sysconfig/nftables.conf"
+      disable_services: ["firewalld"]

@@ -1,0 +1,11 @@
+# raw-node-input.yml: the only file you edit.
+# Copy this file to raw-node-input.yml and replace the four values.
+# raw-node-input.yml is git-ignored because it holds password hashes.
+#
+# Hashes:  mkpasswd --method=sha-512   (package: whois)
+# Key:     the single line from your ~/.ssh/<key>.pub
+
+root_password_hash: "$6$DUMMYSALT$DUMMYROOTHASH"
+initial_username: initial
+initial_password_hash: "$6$DUMMYSALT$DUMMYUSERHASH"
+ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY operator@workstation"

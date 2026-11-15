@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""Render the raw node answer files for every target, test them, and
+optionally install them on a Ventoy USB drive.
+
+Usage:
+    bin/build                                  render into build/ and self-test
+    bin/build --stick /media/initial/Ventoy    also install on the stick
+    bin/build --stick PATH --dry-run           show what would change on the stick
+
+Targets are discovered from the folder layout: <distro>/<version>/<file>.j2,
+for example debian/13/preseed.cfg.j2. The output mirrors the root of the
+Ventoy data partition:
+
+    build/answer-files/<distro>/<version>/<answer file>
+    build/ventoy/ventoy.json       (auto_install section only)
+
+ISO checksums are not checked here. Verify ISOs where they are stored, before
+copying them to the stick, with bin/check-isos.
+
+Requires Python 3 with PyYAML and Jinja2:
+    sudo apt install python3-yaml python3-jinja2
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+try:
+    import jinja2
+    import yaml
+except ImportError:
+    sys.exit("bin/build needs PyYAML and Jinja2: sudo apt install python3-yaml python3-jinja2")
+
+ROOT = Path(__file__).resolve().parent.parent
+BUILD = ROOT / "build"
+BASELINE_VERSION = "0.2.0"
+
+# Template file name -> (installer kind, answer file name on the stick)
+TEMPLATES = {
+    "preseed.cfg.j2": ("preseed", "preseed.cfg"),
+    "user-data.j2": ("autoinstall", "user-data"),
+}
+# Distribution folder -> hostname prefix. deb + 13 + -vt = deb13-vt
+DISTRO_PREFIX = {"debian": "deb", "ubuntu": "ub", "fedora": "fed", "rocky": "rocky"}
+NOT_TARGETS = {"shared", "bin", "build", "docs", "confirmations"}
+
+REQUIRED_KEYS = ["root_password_hash", "initial_username", "initial_password_hash", "ssh_public_key"]
+HASH_RE = re.compile(r"^\$[0-9a-z]+\$\S+$")
+USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+KEY_RE = re.compile(
+    r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|"
+    r"sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+=*( \S.*)?$"
+)
+FORBIDDEN = {"'": "single quote", '"': "double quote", "\\": "backslash", "\n": "line break"}
+
+
+class Problems:
+    def __init__(self):
+        self.errors, self.warnings = [], []
+
+    def error(self, msg):
+        self.errors.append(msg)
+
+    def warn(self, msg):
+        self.warnings.append(msg)
+
+    def report_and_exit_on_error(self):
+        for w in self.warnings:
+            print(f"warning: {w}")
+        for e in self.errors:
+            print(f"error: {e}")
+        if self.errors:
+            sys.exit(1)
+        self.warnings = []
+
+
+def load_input(path, allow_dummy, p):
+    if not path.exists():
+        sys.exit(f"error: {path} not found. Copy raw-node-input.example.yml and fill it in.")
+    data = yaml.safe_load(path.read_text()) or {}
+    values = {}
+    for key in REQUIRED_KEYS:
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            p.error(f"{path.name}: {key} is missing or empty")
+            continue
+        value = value.strip()
+        for ch, name in FORBIDDEN.items():
+            if ch in value:
+                p.error(f"{path.name}: {key} contains a {name}")
+        if "DUMMY" in value and not allow_dummy:
+            p.error(f"{path.name}: {key} still holds the dummy value (use --allow-dummy only for test builds)")
+        values[key] = value
+    extra = set(data) - set(REQUIRED_KEYS)
+    if extra:
+        p.warn(f"{path.name}: ignoring unknown keys: {', '.join(sorted(extra))}")
+    if "root_password_hash" in values and not HASH_RE.match(values["root_password_hash"]):
+        p.error(f"{path.name}: root_password_hash is not a crypt hash (expected $6$... or $y$...)")
+    if "initial_password_hash" in values and not HASH_RE.match(values["initial_password_hash"]):
+        p.error(f"{path.name}: initial_password_hash is not a crypt hash (expected $6$... or $y$...)")
+    if "initial_username" in values and not USER_RE.match(values["initial_username"]):
+        p.error(f"{path.name}: initial_username is not a valid Linux user name")
+    if "ssh_public_key" in values and not KEY_RE.match(values["ssh_public_key"]):
+        p.error(f"{path.name}: ssh_public_key is not a single OpenSSH public key line")
+    p.report_and_exit_on_error()
+    return values
+
+
+def read_shared(rel, p):
+    path = ROOT / rel
+    if not path.is_file():
+        p.error(f"{rel}: file not found")
+        return ""
+    text = path.read_text()
+    if not text.endswith("\n"):
+        p.error(f"{rel}: must end with a line break")
+    for n, line in enumerate(text.split("\n")[:-1], 1):
+        if "'" in line:
+            p.error(f"{rel}:{n}: contains a single quote, which cannot be embedded in a preseed printf argument")
+        if line.endswith("\\"):
+            p.error(f"{rel}:{n}: ends with a backslash, which the preseed parser would treat as a line continuation")
+        if line == "EOF":
+            p.error(f"{rel}:{n}: a line reading EOF would end the Ubuntu heredoc early")
+    return text
+
+
+def preseed_writer(content, dest, mode):
+    lines = [
+        f"    mkdir -p /target{os.path.dirname(dest)}; \\",
+        "    printf '%s\\n' \\",
+    ]
+    lines += [f"        '{line}' \\" for line in content.split("\n")[:-1]]
+    lines += [f"        > /target{dest}; \\", f"    chmod {mode} /target{dest}; \\"]
+    return "\n".join(lines)
+
+
+def autoinstall_writer(content, dest, mode):
+    lines = [f"    - mkdir -p /target{os.path.dirname(dest)}", "    - |", f"      cat > /target{dest} <<'EOF'"]
+    lines += [("      " + line) if line else "" for line in content.split("\n")[:-1]]
+    lines += ["      EOF", f"    - chmod {mode} /target{dest}"]
+    return "\n".join(lines)
+
+
+def discover_targets():
+    targets = []
+    for tpl in sorted(ROOT.glob("*/*/*.j2")):
+        distro, version = tpl.parent.parent.name, tpl.parent.name
+        if distro in NOT_TARGETS or tpl.name not in TEMPLATES:
+            continue
+        kind, answer_name = TEMPLATES[tpl.name]
+        prefix = DISTRO_PREFIX.get(distro, distro) + version.replace(".", "")
+        targets.append({
+            "distro": distro, "version": version, "template": tpl, "kind": kind,
+            "answer_name": answer_name, "hostname_base": f"{prefix}-vt",
+            "rel": f"{distro}/{version}",
+        })
+    return targets
+
+
+def render(target, values, p):
+    files = []  # (dest, content, mode) written on the node, for the self-test
+
+    writer = preseed_writer if target["kind"] == "preseed" else autoinstall_writer
+
+    def write(src, dest, mode):
+        content = read_shared(src, p)
+        files.append((dest, content, mode))
+        return writer(content, dest, mode)
+
+    def write_text(content, dest, mode):
+        files.append((dest, content, mode))
+        return writer(content, dest, mode)
+
+    raw_node_conf = (
+        "# Written by the raw node answer file. Read by raw-node-firstboot.\n"
+        f"RAW_NODE_USER={values['initial_username']}\n"
+        f"RAW_NODE_TARGET={target['rel']}\n"
+        f"RAW_NODE_BASELINE={BASELINE_VERSION}\n"
+    )
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(str(ROOT)),
+        undefined=jinja2.StrictUndefined,
+        keep_trailing_newline=True,
+        autoescape=False,
+    )
+    tpl = env.get_template(str(target["template"].relative_to(ROOT)))
+    text = tpl.render(
+        write=write, write_text=write_text, raw_node_conf=raw_node_conf,
+        hostname_base=target["hostname_base"], **values,
+    )
+    return text, files
+
+
+def run_sh(script, p, label):
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    if result.returncode != 0:
+        p.error(f"{label}: self-test shell run failed: {result.stderr.strip()}")
+    return result.returncode == 0
+
+
+def compare_written(root, files, label, p):
+    for dest, content, mode in files:
+        path = Path(root + dest)
+        if not path.exists():
+            p.error(f"{label}: self-test did not produce {dest}")
+            continue
+        if path.read_text() != content:
+            p.error(f"{label}: {dest} differs from its source after embedding")
+        if oct(path.stat().st_mode)[-4:] != mode:
+            p.error(f"{label}: {dest} has mode {oct(path.stat().st_mode)[-4:]}, expected {mode}")
+
+
+def selftest_preseed(text, files, values, label, p):
+    joined = re.sub(r"\\\n", "", text)
+    commands = [l for l in joined.split("\n") if l.startswith("d-i preseed/late_command string ")]
+    if len(commands) != 1:
+        p.error(f"{label}: expected one preseed/late_command")
+        return
+    cmd = commands[0].split("string ", 1)[1].strip()
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(f"{tmp}/home/{values['initial_username']}/.ssh")
+        script = "in_target() { :; }; " + cmd.replace("in-target", "in_target").replace("/target", tmp)
+        if run_sh(script, p, label):
+            compare_written(tmp, files, label, p)
+            key = Path(f"{tmp}/home/{values['initial_username']}/.ssh/authorized_keys").read_text()
+            if key != values["ssh_public_key"] + "\n":
+                p.error(f"{label}: authorized_keys does not match ssh_public_key")
+    if shutil.which("debconf-set-selections"):
+        with tempfile.NamedTemporaryFile("w", suffix=".cfg") as f:
+            f.write(text)
+            f.flush()
+            r = subprocess.run(["debconf-set-selections", "-c", f.name], capture_output=True, text=True)
+            # On a workstation the Debian Installer's own questions (passwd/*, netcfg/*, ...)
+            # are not registered, so debconf reports them as unknown. That is expected:
+            # they exist inside the installer. Only other messages are real syntax problems.
+            real = [l for l in r.stderr.splitlines()
+                    if l.strip() and "Cannot find a question for" not in l]
+            if real:
+                p.error(f"{label}: debconf-set-selections -c reported: " + " / ".join(real))
+    else:
+        p.warn(f"{label}: debconf-set-selections not found, preseed syntax not checked")
+
+
+def selftest_autoinstall(text, files, label, p):
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        p.error(f"{label}: YAML does not parse: {exc}")
+        return
+    ai = data.get("autoinstall") if isinstance(data, dict) else None
+    if not isinstance(ai, dict) or ai.get("version") != 1:
+        p.error(f"{label}: missing autoinstall section with version: 1")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        script = []
+        for c in ai.get("late-commands", []):
+            if isinstance(c, str) and c.split(" ", 1)[0] in ("mkdir", "cat", "chmod"):
+                script.append(c.replace("/target", tmp))
+        if run_sh("\n".join(script), p, label):
+            compare_written(tmp, files, label, p)
+
+
+def check_tools(p):
+    nft_src = ROOT / "shared/nftables/nftables.conf"
+    if shutil.which("nft"):
+        r = subprocess.run(["nft", "-c", "-f", str(nft_src)], capture_output=True, text=True)
+        if r.returncode != 0:
+            if "permitted" in r.stderr.lower():
+                p.warn("nft -c needs root; check the ruleset once with: "
+                       "sudo nft -c -f shared/nftables/nftables.conf")
+            else:
+                p.error(f"shared/nftables/nftables.conf: nft -c failed: {r.stderr.strip()}")
+    else:
+        p.warn("nft not found, firewall ruleset not checked")
+    if shutil.which("shellcheck"):
+        for script in sorted((ROOT / "shared/bin").iterdir()):
+            r = subprocess.run(["shellcheck", "-s", "sh", str(script)], capture_output=True, text=True)
+            if r.returncode != 0:
+                p.error(f"shared/bin/{script.name}: shellcheck reported problems:\n{r.stdout}")
+    else:
+        p.warn("shellcheck not found, shared scripts not linted (sudo apt install shellcheck)")
+
+
+def check_isos(stick, targets, p):
+    """Cheap presence check only. Verify checksums at the source with bin/check-isos."""
+    for t in targets:
+        folder = stick / "iso" / t["rel"]
+        isos = sorted(folder.glob("*.iso"))
+        if not isos:
+            p.warn(f"/iso/{t['rel']}: no ISO found; the auto_install entry is still written")
+            continue
+        if len(isos) > 1:
+            p.warn(f"/iso/{t['rel']}: {len(isos)} ISOs share one answer file: {', '.join(i.name for i in isos)}")
+        print(f"  /iso/{t['rel']}: {', '.join(i.name for i in isos)}")
+
+
+def install_on_stick(stick, targets, auto_install, dry_run, p):
+    if not (stick / "ventoy").is_dir():
+        p.error(f"{stick}: no ventoy/ folder; is this the Ventoy data partition?")
+        p.report_and_exit_on_error()
+    stray = stick / "answer-files" / "ventoy.json"
+    if stray.exists():
+        p.warn(f"{stray} is ignored by Ventoy, which reads only ventoy/ventoy.json; consider removing it")
+    actions = []
+    for t in targets:
+        src = BUILD / "answer-files" / t["rel"] / t["answer_name"]
+        dst = stick / "answer-files" / t["rel"] / t["answer_name"]
+        actions.append(("copy", src, dst))
+    vj = stick / "ventoy" / "ventoy.json"
+    existing = {}
+    if vj.exists():
+        existing = json.loads(vj.read_text(encoding="utf-8-sig"))
+    ours = {e["parent"] for e in auto_install}
+    kept = [e for e in existing.get("auto_install", [])
+            if not any(str(e.get("parent", e.get("image", ""))).startswith(o) for o in ours)]
+    merged = dict(existing)
+    merged["auto_install"] = kept + auto_install
+    print(f"\nStick: {stick}")
+    for _, src, dst in actions:
+        print(f"  {'would write' if dry_run else 'writing'} {dst.relative_to(stick)}")
+    other = [k for k in existing if k != "auto_install"]
+    print(f"  {'would update' if dry_run else 'updating'} ventoy/ventoy.json: "
+          f"{len(auto_install)} raw node entries, {len(kept)} other auto_install entries kept"
+          + (f", other settings kept: {', '.join(other)}" if other else ""))
+    if dry_run:
+        return
+    for _, src, dst in actions:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+    if vj.exists():
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = vj.with_name(f"ventoy.json.raw-node-backup-{stamp}")
+        shutil.copyfile(vj, backup)
+        print(f"  backup: {backup.relative_to(stick)}")
+    vj.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Render, test and install raw node answer files.")
+    ap.add_argument("--input", type=Path, default=ROOT / "raw-node-input.yml")
+    ap.add_argument("--allow-dummy", action="store_true", help="accept DUMMY values (test builds only)")
+    ap.add_argument("--stick", type=Path, help="Ventoy data partition, e.g. /media/initial/Ventoy")
+    ap.add_argument("--dry-run", action="store_true", help="with --stick: show changes, write nothing")
+    args = ap.parse_args()
+
+    p = Problems()
+    values = load_input(args.input, args.allow_dummy, p)
+    targets = discover_targets()
+    if not targets:
+        sys.exit("error: no targets found (expected <distro>/<version>/*.j2)")
+
+    for sub in ("answer-files", "ventoy"):
+        shutil.rmtree(BUILD / sub, ignore_errors=True)
+
+    check_tools(p)
+    p.report_and_exit_on_error()
+
+    print("Targets:")
+    auto_install = []
+    for t in targets:
+        label = f"{t['rel']}/{t['answer_name']}"
+        text, files = render(t, values, p)
+        p.report_and_exit_on_error()
+        if t["kind"] == "preseed":
+            selftest_preseed(text, files, values, label, p)
+        else:
+            selftest_autoinstall(text, files, label, p)
+        p.report_and_exit_on_error()
+        out = BUILD / "answer-files" / t["rel"] / t["answer_name"]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text)
+        out.chmod(0o600)
+        auto_install.append({
+            "parent": f"/iso/{t['rel']}",
+            "template": f"/answer-files/{t['rel']}/{t['answer_name']}",
+        })
+        print(f"  {t['rel']}: {t['answer_name']}, hostname {t['hostname_base']}-xxxx, "
+              f"{len(files)} files embedded, self-test OK")
+
+    (BUILD / "ventoy").mkdir(parents=True, exist_ok=True)
+    (BUILD / "ventoy" / "ventoy.json").write_text(json.dumps({"auto_install": auto_install}, indent=2) + "\n")
+    print(f"\nWrote {BUILD.relative_to(ROOT)}/answer-files/ and {BUILD.relative_to(ROOT)}/ventoy/ventoy.json")
+
+    if args.stick:
+        stick = args.stick.resolve()
+        print(f"\nISOs on {stick}:")
+        check_isos(stick, targets, p)
+        p.report_and_exit_on_error()
+        install_on_stick(stick, targets, auto_install, args.dry_run, p)
+    p.report_and_exit_on_error()
+
+
+if __name__ == "__main__":
+    main()

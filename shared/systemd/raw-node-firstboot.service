@@ -1,0 +1,14 @@
+[Unit]
+Description=Raw node first boot: hostname suffix and confirmation report
+Documentation=file:/usr/local/sbin/raw-node-firstboot
+Wants=network-online.target
+After=network-online.target cloud-init.service
+ConditionPathExists=!/var/lib/raw-node/confirmation.yml
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/raw-node-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

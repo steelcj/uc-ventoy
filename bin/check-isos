@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Verify ISO images against the SHA512SUMS or SHA256SUMS file in their folder.
+
+Usage:
+    bin/check-isos                       check everything under ~/iso
+    bin/check-isos ~/iso/ubuntu/24.04    check one folder (and its subfolders)
+    bin/check-isos DIR [DIR ...]         check several folders
+
+Run it where the ISOs are stored, before copying them to the Ventoy stick.
+Every ISO is hashed on every run.
+
+For each folder that contains ISOs:
+  - SHA512SUMS is used when present (Debian), otherwise SHA256SUMS (Ubuntu)
+  - each ISO is hashed and compared with its line in that file
+  - the file's signature, <file>.gpg (Ubuntu) or <file>.sign (Debian), is
+    checked with gpg when present and gpg is installed
+  - ISOs in a folder without a checksum file are listed as unverified
+
+Exit status: 0 if no ISO failed, 1 if any ISO failed its checksum or a
+signature is bad, 2 for usage errors. With --strict, unverified ISOs and
+signatures that could not be checked also count as failures.
+
+Needs only Python 3. Signature checks need gpg and the publisher's key.
+"""
+
+import argparse
+import hashlib
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+# Checksum files in order of preference, with the hash each one uses.
+CHECKSUM_FILES = (("SHA512SUMS", "sha512"), ("SHA256SUMS", "sha256"))
+SIGNATURE_SUFFIXES = (".gpg", ".sign")
+
+
+def hash_of(path, algorithm):
+    h = hashlib.new(algorithm)
+    size = path.stat().st_size
+    done = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(4 << 20), b""):
+            h.update(chunk)
+            done += len(chunk)
+            if sys.stdout.isatty() and size:
+                print(f"\r    hashing {done * 100 // size:3d}%", end="", flush=True)
+    if sys.stdout.isatty():
+        print("\r" + " " * 20 + "\r", end="")
+    return h.hexdigest()
+
+
+def read_sums(path, hex_length):
+    sums = {}
+    for line in path.read_text(errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and len(parts[0]) == hex_length:
+            sums[parts[1].lstrip("*").removeprefix("./")] = parts[0].lower()
+    return sums
+
+
+def check_signature(sums_file):
+    """Return (status, detail) for the checksum file's signature."""
+    sig = next((sums_file.with_name(sums_file.name + s) for s in SIGNATURE_SUFFIXES
+                if sums_file.with_name(sums_file.name + s).exists()), None)
+    if sig is None:
+        return "none", "no signature file"
+    if not shutil.which("gpg"):
+        return "unchecked", f"{sig.name} present, gpg not installed"
+    r = subprocess.run(
+        ["gpg", "--batch", "--verify", str(sig), str(sums_file)],
+        capture_output=True, text=True,
+    )
+    out = r.stderr
+    if r.returncode == 0:
+        signer = next((l.split("Good signature from", 1)[1].strip()
+                       for l in out.splitlines() if "Good signature from" in l), "")
+        return "good", f"{sig.name} good signature {signer}".rstrip()
+    if "No public key" in out or "public key not found" in out:
+        key = next((l.split()[-1] for l in out.splitlines() if "using" in l and "key" in l), "")
+        return "unchecked", f"{sig.name} present, signing key {key} not imported".replace("  ", " ")
+    return "bad", f"{sig.name} BAD signature"
+
+
+def check_folder(folder, isos, counts):
+    print(f"\n{folder}")
+    found = [(folder / name, algo) for name, algo in CHECKSUM_FILES if (folder / name).exists()]
+    if not found:
+        for iso in isos:
+            print(f"  UNVERIFIED  {iso.name}  (no SHA512SUMS or SHA256SUMS in this folder)")
+            counts["unverified"] += 1
+        return
+    sums_file, algorithm = found[0]
+    status, detail = check_signature(sums_file)
+    label = {"good": "SIGNED", "bad": "BAD-SIG", "unchecked": "UNSIGNED?", "none": "UNSIGNED"}[status]
+    print(f"  {label:<10}  {sums_file.name}: {detail}")
+    if status == "bad":
+        counts["failed"] += 1
+    elif status in ("unchecked", "none"):
+        counts["sig_unchecked"] += 1
+    sums = read_sums(sums_file, hashlib.new(algorithm).digest_size * 2)
+    for iso in isos:
+        expected = sums.get(iso.name)
+        if expected is None:
+            print(f"  UNVERIFIED  {iso.name}  (not listed in {sums_file.name})")
+            counts["unverified"] += 1
+            continue
+        actual = hash_of(iso, algorithm)
+        if actual == expected:
+            print(f"  OK          {iso.name}")
+            counts["ok"] += 1
+        else:
+            print(f"  FAILED      {iso.name}  ({algorithm.upper()} does not match)")
+            counts["failed"] += 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Verify ISO images against SHA512SUMS or SHA256SUMS before copying them.")
+    ap.add_argument("dirs", nargs="*", type=Path, default=[Path("~/iso")],
+                    help="folders to check (default: ~/iso)")
+    ap.add_argument("--strict", action="store_true",
+                    help="also fail on unverified ISOs and unchecked signatures")
+    args = ap.parse_args()
+
+    counts = {"ok": 0, "failed": 0, "unverified": 0, "sig_unchecked": 0}
+    for d in args.dirs:
+        d = d.expanduser().resolve()
+        if not d.is_dir():
+            print(f"error: {d} is not a directory", file=sys.stderr)
+            sys.exit(2)
+        folders = {}
+        for iso in sorted(d.rglob("*.iso")):
+            folders.setdefault(iso.parent, []).append(iso)
+        if not folders:
+            print(f"\n{d}: no ISO files found")
+        for folder in sorted(folders):
+            check_folder(folder, folders[folder], counts)
+
+    print(f"\nSummary: {counts['ok']} OK, {counts['failed']} failed, "
+          f"{counts['unverified']} unverified, {counts['sig_unchecked']} checksum files without a checked signature")
+    if counts["failed"]:
+        sys.exit(1)
+    if args.strict and (counts["unverified"] or counts["sig_unchecked"]):
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
