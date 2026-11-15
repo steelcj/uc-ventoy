@@ -46,6 +46,21 @@ default_dev() {
     return 0
 }
 
+# Wait up to 60 seconds for a default route, so the hostname suffix and the
+# addresses in the report are not taken before DHCP has finished.
+wait_for_route() {
+    tries=0
+    while [ "$tries" -lt 60 ]; do
+        if [ -n "$(ip -4 route show default 2>/dev/null)" ] || [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
+            return 0
+        fi
+        sleep 1
+        tries=$((tries + 1))
+    done
+    return 1
+}
+wait_for_route || echo "raw-node-firstboot: no default route after 60 seconds" >&2
+
 dev="$(default_dev -4)"
 if [ -z "$dev" ]; then
     dev="$(default_dev -6)"
@@ -86,3 +101,4 @@ mkdir -p /etc/issue.d
 agetty --reload >/dev/null 2>&1 || true
 
 exit "$status"
+

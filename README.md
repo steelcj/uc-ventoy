@@ -14,23 +14,113 @@ I would highly recommend running the included utility against any ISO's that you
 
 ### bin/check-isos
 
-bin/check-isos is used on your local system to check a directory of one or more iso images on your local system.
+bin/check-isos is used on your local system to check a directory of one or more iso images you have downloaded to  your local system. 
 
 **`bin/check-isos`** takes any directory and rehashes every ISO on every run:
 
 ```sh
 bin/check-isos                        # everything under ~/iso
+```
+
+Output example:
+
+```bash
+/home/initial/iso/bios?
+  UNVERIFIED  n32ur32w.iso  (no SHA512SUMS or SHA256SUMS in this folder)
+  UNVERIFIED  n32ur33w.iso  (no SHA512SUMS or SHA256SUMS in this folder)
+
+/home/initial/iso/debian/13
+  SIGNED      SHA512SUMS: SHA512SUMS.sign good signature "Debian CD signing key <debian-cd@lists.debian.org>" [unknown]
+  OK          debian-13.7.0-amd64-netinst.iso
+
+/home/initial/iso/ubuntu/24.04
+  SIGNED      SHA256SUMS: SHA256SUMS.gpg good signature "Ubuntu CD Image Automatic Signing Key (2012) <cdimage@ubuntu.com>" [unknown]
+  OK          ubuntu-24.04.5-live-server-amd64.iso
+
+/home/initial/iso/ubuntu/26.04
+  SIGNED      SHA256SUMS: SHA256SUMS.gpg good signature "Ubuntu CD Image Automatic Signing Key (2012) <cdimage@ubuntu.com>" [unknown]
+  FAILED      ubuntu-26.04.1-live-server-amd64.iso  (SHA256 does not match)
+
+/home/initial/iso/windows
+  UNVERIFIED  Win11_24H2_English_x64.iso  (no SHA512SUMS or SHA256SUMS in this folder)
+  UNVERIFIED  Win11_25H2_English_x64_v2.incus.iso  (no SHA512SUMS or SHA256SUMS in this folder)
+  UNVERIFIED  Win11_25H2_English_x64_v2.iso  (no SHA512SUMS or SHA256SUMS in this folder)
+  UNVERIFIED  virtio-win-0.1.302.iso  (no SHA512SUMS or SHA256SUMS in this folder)
+
+Summary: 2 OK, 1 failed, 6 unverified, 0 checksum files without a checked signature
+```
+
+The script works by looking for checksum files in each iso directories in order of preference:
+
+```bash
+CHECKSUM_FILES = (("SHA512SUMS", "sha512"), ("SHA256SUMS", "sha256"))
+SIGNATURE_SUFFIXES = (".gpg", ".sign")
+```
+
+Directories containing the iso and checksums are verified and every iso contained in the root directory scanned.  **`check-isos`** reports on each ISO in the scanned directory tree  `OK`, `FAILED` or `UNVERIFIED`, and the tool exits with an error if any ISO fails.
+
+So in the example output above we see that in ~/iso the ubuntu/24/ubuntu-26.04.1-live-server-amd64.iso failed the checksum and the process stopped. In addition we see that 6 iso images where unverified meaning to no checksums where included in each of those iso directories. The scanner also:
+
+- Catches a corrupted ISO and a checksum file edited after signing
+- Lists all ISOs with no checksum to check against
+
+In this example you might download a new ubuntu/26/ server iso and the associated checksum files to the directory. In this case you might only want to scan that director so you would run:
+
+```bash
 bin/check-isos ~/iso/ubuntu/24.04     # just a newly downloaded iso
 ```
 
-Each ISO is reported as `OK`, `FAILED` or `UNVERIFIED`, and the tool exits with an error if any ISO fails.
+I did this using a script which output this:
 
-- It catches a corrupted ISO and a checksum file edited after signing.
-- It listed ISOs with no checksum to check against
+```bash
+gpg: key D94AA3F0EFE21092: "Ubuntu CD Image Automatic Signing Key (2012) <cdimage@ubuntu.com>" not changed
+gpg: Total number processed: 1
+gpg:              unchanged: 1
+gpg: Signature made Thu 27 Aug 2026 06:43:09 PM EDT
+gpg:                using RSA key 843938DF228D22F7B3742BC0D94AA3F0EFE21092
+gpg: Good signature from "Ubuntu CD Image Automatic Signing Key (2012) <cdimage@ubuntu.com>" [unknown]
+gpg: WARNING: This key is not certified with a trusted signature!
+gpg:          There is no indication that the signature belongs to the owner.
+Primary key fingerprint: 8439 38DF 228D 22F7 B374  2BC0 D94A A3F0 EFE2 1092
+ubuntu-26.04.1-live-server-amd64.iso: OK
+```
 
-For example, to check a  `debian/13` iso download the `SHA256SUMS` and `SHA256SUMS.sign` from the same Debian mirror folder as the ISO, and it will verify the iso image you downloaded.
+so I am expecting the iso to pass and when running `bin/check-isos ~/iso/ubuntu/24.04     # just a newly downloaded iso` I see that my download script worked perfectly and that my scan results match my download script results:
 
-## Requirements
+```bash
+ bin/check-isos ~/iso/ubuntu/24.04     # just a newly downloaded iso
+
+/home/initial/iso/ubuntu/24.04
+  SIGNED      SHA256SUMS: SHA256SUMS.gpg good signature "Ubuntu CD Image Automatic Signing Key (2012) <cdimage@ubuntu.com>" [unknown]
+  OK          ubuntu-24.04.5-live-server-amd64.iso
+
+Summary: 1 OK, 0 failed, 0 unverified, 0 checksum files without a checked signature
+```
+
+So to check a  `debian/13` iso download the `SHA256SUMS` and `SHA256SUMS.sign` from the same Debian mirror folder as the ISO, and it will verify the iso image you downloaded.
+
+### Updating or adding new ISOs to your ventoy usb stick
+
+In my case I had an old ubuntu server iso `ubuntu-24.04.1-live-server-amd64.iso`and I am upgrading to the latest `ubuntu-24.04.5-live-server-amd64.iso`live server iso.
+
+```bash
+# delete the old version on usb ventoy stick
+rm /media/initial/Ventoy/iso/ubuntu/24.04/ubuntu-24.04.1-live-server-amd64.iso
+# copy the updated version to my ventoy usb stick
+cp ~/iso/ubuntu/24.04/ubuntu-24.04.5-live-server-amd64.iso /media/initial/Ventoy/iso/ubuntu/24.04/
+```
+
+### Notes:
+
+You can run `check-isos` against your Ventoy iso directory but this may take significantly longer to run:
+
+Example on an Ubuntu based debian system, your command may need to be different for running against your mount point, which can vary depending your workstations linux distribution and version.
+
+```bash
+bin/check-isos /media/initial/Ventoy/iso
+```
+
+## Requirements for building your Ventoy automated installations
 
 ### PyYAML and Jinja2
 
@@ -50,9 +140,19 @@ Alternatively these to Python tools can be sand boxed by installing them by inst
 
 See the document link below for installing mkpasswd on your linux distribution:
 
-* [installing-mkpasswd](./docs/installing-mkpasswd)
+* [installing-mkpasswd](./en/docs/installing-mkpasswd)
 
-## Optional tools
+## Optional
+
+### Network Adapter and Cable
+
+* You are probably going to want a physical connection to your network for speed as this is a net installer.
+  * Network cable
+  * Network dongle in the case of a laptop or for a physically isolated server that has no network card.
+
+* Your system **may** be able to install from a wireless adapter but you will need to 
+
+
 
 For development and troubleshooting work you may want additional tools.
 
@@ -137,7 +237,9 @@ Targets:
 Wrote build/answer-files/ and build/ventoy/ventoy.json
 ```
 
-#### nftables
+#### nftables (optional)
+
+A useful tool for developers, CI automations or editing the included firewall configuration.
 
 This setup is designed to work with as many linux distro's as possible to it ships with support for an nftables firewall. If you are modifying the default firewall configuration (port 22 only at this point in time) the you are going to want to ensure that your firewall configuration is valid. You do that with a utility called `nft`
 
@@ -157,6 +259,10 @@ Output example when you are good to go:
 ```bash
 0
 ```
+
+#### shellcheck (optional)
+
+A useful tool for developers, CI automations or editing any included scripts
 
 ## Preview the changes
 
@@ -199,12 +305,88 @@ So you can see that it again reminds us of the `nft`and `spellcheck`options for 
 
 The other item of note is that it has identified a second ventoy.json file
 
+```bash
+bin/build --stick /media/initial/Ventoy --dry-run
+```
 
+### Writing custom answer files to your Ventoy usb stick
 
-1. : `bin/build --stick /media/initial/Ventoy --dry-run`
-2. Write to the stick: `bin/build --stick /media/initial/Ventoy`
+#### Requires
 
-Requires Python 3 with PyYAML and Jinja2 (`sudo apt install python3-yaml python3-jinja2`). Optional checks use `debconf-set-selections`, `nft`, `shellcheck` and `gpg` when they are installed.
+Requires Python 3 with PyYAML and Jinja2 on your workstations
+
+#### Optional Check
+
+When they are installed, optional checks will use:
+
+*  debconf-set-selections
+* nft
+* shellcheck and:
+* gpg
+
+#### Writing your to your Ventoy stick
+
+ Once you have done your dry run and it includes the requirements for any options checks you need, copy your custom installers over to your usb Ventoy stick
+
+```bash
+bin/build --stick /media/initial/Ventoy
+```
+
+Output example:
+
+```bash
+warning: nft -c needs root; check the ruleset once with: sudo nft -c -f shared/nftables/nftables.conf
+warning: shellcheck not found, shared scripts not linted (sudo apt install shellcheck)
+Targets:
+  debian/13: preseed.cfg, hostname deb13-vt-xxxx, 6 files embedded, self-test OK
+  ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 7 files embedded, self-test OK
+  ubuntu/26.04: user-data, hostname ub2604-vt-xxxx, 7 files embedded, self-test OK
+
+Wrote build/answer-files/ and build/ventoy/ventoy.json
+
+ISOs on /media/initial/Ventoy:
+  /iso/debian/13: debian-13.7.0-amd64-netinst.iso
+  /iso/ubuntu/24.04: ubuntu-24.04.5-live-server-amd64.iso
+  /iso/ubuntu/26.04: ubuntu-26.04-live-server-amd64.iso
+
+Stick: /media/initial/Ventoy
+  writing answer-files/debian/13/preseed.cfg
+  writing answer-files/ubuntu/24.04/user-data
+  writing answer-files/ubuntu/26.04/user-data
+  updating ventoy/ventoy.json: 3 raw node entries, 0 other auto_install entries kept
+  backup: ventoy/ventoy.json.raw-node-backup-20261115-011245
+warning: /media/initial/Ventoy/answer-files/ventoy.json is ignored by Ventoy, which reads only ventoy/ventoy.json; consider removing it
+```
+
+In the output at the end you will notice the warning about a second ventoy.json that I have stored here:
+
+```bash
+ventoy/ventoy.json
+```
+
+It's an extra that I used when developing, I should clean it up or perhaps place it in a backup directory so I can use it as a "known good" in future development. I will leave it alone for the time being.
+
+## Testing against real systems
+
+Now I am ready to test my automated configuration against real hardware!!!
+
+On my local system
+
+* I will get out of all directories on my USB stick so that I can saftly remove it.
+
+On my test system
+
+* Backup anything I want to save
+
+* Ensure that I have a physical network (cable) connection to my testing system
+  * hardwiringwifi may work but since this is a new installer I what thing to go as quickly as possible so I am hard wiring via a network cable
+
+* Insert the Ventoy installer into a bootable USB port on the target system
+* Boot the system to the usb drive
+  * On my old Sansung laptop I need to press F9 right after starting it. If you are not sure, check your hardware manual or the internet for instructions on booting to a usb stick on your hardwate.
+
+* Partitioning is not automated so for the Debian 13 installation I chose the LVM option and not (LUKS?) encryption as that requires a lot more work for allowing Ansible to complete my full configuration.
+* 
 
 ## Layout
 

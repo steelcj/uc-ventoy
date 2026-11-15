@@ -288,12 +288,12 @@ Because one folder can carry several answer files, role variants do not need a s
 
 ### Target documents
 
-| Distribution | Installer | Document | Status |
-| --- | --- | --- | --- |
-| Debian 13 "trixie" | Debian Installer, preseed | [debian-13.md](debian-13.md) | Reviewed, not yet tested in a virtual machine |
-| Ubuntu Server 24.04 LTS | Subiquity, autoinstall | [ubuntu-24.04.md](ubuntu-24.04.md) | Reviewed, not yet tested in a virtual machine |
-| Ubuntu Server 26.04 LTS | Subiquity, autoinstall | [ubuntu-26.04.md](ubuntu-26.04.md) | Reviewed, not yet tested in a virtual machine |
-| Fedora Server, Rocky Linux | Anaconda, kickstart | Not started | See [Portability notes](#portability-notes) |
+| Distribution | Installer | Document | Metal | VM | Status |
+| --- | --- | --- | --- | --- | --- |
+| Debian 13 "trixie" | Debian Installer, preseed | [debian-13.md](debian-13.md) | Passed 2026-11-15 | Not yet | Supported, reference node |
+| Ubuntu Server 24.04 LTS | Subiquity, autoinstall | [ubuntu-24.04.md](ubuntu-24.04.md) | Not yet | Not yet | In testing |
+| Ubuntu Server 26.04 LTS | Subiquity, autoinstall | [ubuntu-26.04.md](ubuntu-26.04.md) | Not yet | Not yet | In testing |
+| Fedora Server, Rocky Linux | Anaconda, kickstart | Not started | No | No | Planned, see [Portability notes](#portability-notes) |
 
 Target documents are added one distribution at a time. A distribution counts as supported once its acceptance checks pass and its `sha256sum` output matches the other raw nodes.
 
