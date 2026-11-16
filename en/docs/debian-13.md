@@ -1,7 +1,7 @@
 ---
 title: "Ventoy Automated Configuration for Debian 13 Server"
 version: "0.3.0"
-date: 2026-11-14
+date: 2026-11-15
 author: "Christopher Steel"
 status: "Draft, reviewed against current documentation, not yet tested in virtual machines"
 description: "Debian 13 preseed answer file that Ventoy delivers to the Debian Installer to produce the raw node defined in raw-node-baseline.md."
@@ -52,7 +52,7 @@ Some renderers, including GitHub, disable clicks inside Mermaid charts. The same
 
 Template: [`debian/13/preseed.cfg.j2`](../../debian/13/preseed.cfg.j2). `bin/build` renders it into `build/answer-files/debian/13/preseed.cfg`, filling in the [inputs](raw-node-baseline.md#inputs) and embedding the [canonical files](raw-node-baseline.md#canonical-files).
 
-The file answers, in order: localization, network and hostname, mirror, clock and time zone, the root account, the initial user, package selection (`standard`, `ssh-server`, plus `sudo`, `nftables` and `python3`), and the boot loader. Partitioning is deliberately left unanswered. A single `late_command` then completes the raw node: it adds the initial user to `sudo`, installs the SSH key, writes the canonical files and enables `nftables.service` and `raw-node-firstboot.service`.
+The file answers, in order: localization, network and hostname, mirror, clock and time zone, the root account, the initial user, package selection (`standard`, `ssh-server`, plus `sudo`, `nftables`, `python3` and `foomuuri`), and the boot loader. Partitioning is deliberately left unanswered. A single `late_command` then completes the raw node: it adds the initial user to `sudo`, installs the SSH key, writes the canonical files, masks `nftables.service` and enables `foomuuri.service` and `raw-node-firstboot.service`.
 
 Each canonical file is written with `printf`, one single-quoted argument per line, so the rendered answer file stays readable:
 
@@ -74,7 +74,11 @@ Each canonical file is written with `printf`, one single-quoted argument per lin
 
 A preconfiguration file should begin with `#_preseed_V1`, and its syntax can be checked with `debconf-set-selections -c` <a id="cite-debian-b3"></a>([Debian Project, n.d.-a](#ref-debian-b3)). `bin/build` runs that check when the tool is installed. On a workstation, debconf reports the installer's own questions, such as `passwd/root-password-crypted`, as unknown. That is expected, and the build ignores those messages while still failing on real syntax errors.
 
-Debian ships `nftables.service` disabled, so the rules in `/etc/nftables.conf` are not loaded at boot until the service is enabled <a id="cite-hertzog-mas-firewall"></a>([Hertzog & Mas, n.d.](#ref-hertzog-mas-firewall)). `ssh.service` is already enabled by the `openssh-server` package. Debian installs no other firewall manager by default.
+The firewall is Foomuuri 0.27 from Debian's main archive, which pulls in `nftables` as a dependency. The package does not enable its service, so `late_command` enables `foomuuri.service`. That unit is ordered before `network-pre.target`, and ifupdown brings the interfaces up after that target, so the rules are in force before the network. It also starts `foomuuri-boot.service`, which loads the last good ruleset earlier still from the second boot on. `foomuuri-boot.service` has no install section, so it is not enabled separately. Debian ships `nftables.service` disabled <a id="cite-hertzog-mas-firewall"></a>([Hertzog & Mas, n.d.](#ref-hertzog-mas-firewall)), and `late_command` masks it as well, because its stop action flushes every table, Foomuuri's included. Debian installs no other firewall manager by default, and it has no cloud-init, so the packaged `foomuuri.service` is used unchanged.
+
+`ssh.service` is already enabled by the `openssh-server` package. It reads `Port` from `/etc/ssh/sshd_config.d/20-raw-node-port.conf`.
+
+The rendered `late_command` is about 19 kB once the installer has joined its lines, roughly twice the size that passed on metal with baseline 0.2.0, mostly because of the longer report script. The installer's parser has no fixed limit in its source, but the first installation with this baseline should confirm it.
 
 `netcfg/get_hostname` is only a fallback when DHCP does not supply a name, so `netcfg/hostname` forces `deb13-vt` regardless of DHCP. The domain is `home.arpa` because `.local` is reserved for Multicast DNS <a id="cite-rfc6762"></a>([Cheshire & Krochmal, 2013](#ref-rfc6762)), and `home.arpa` is the name set aside for residential and small networks <a id="cite-rfc8375"></a>([Pfister & Lemon, 2018](#ref-rfc8375)). At first boot, `raw-node-firstboot` replaces `deb13-vt` with the suffixed name in both `/etc/hostname` and `/etc/hosts`, including the `deb13-vt.home.arpa` entry.
 
@@ -91,9 +95,9 @@ Language and keyboard may still be asked before the preseed file is read, depend
 | RN-03 | `passwd/root-login` and `passwd/root-password-crypted`; root SSH login refused by the drop-in |
 | RN-04 | `passwd/username` and `passwd/user-password-crypted`; `usermod -aG sudo` in `late_command` |
 | RN-05 | `install -d -m 0700`, `printf` and `chmod 0600` in `late_command` |
-| RN-06 | `tasksel` `ssh-server`; `ssh.service` enabled by the package |
-| RN-07 | `printf` writes `/etc/ssh/sshd_config.d/10-local-auth.conf`; Debian includes `sshd_config.d/*.conf` at the top of `sshd_config` |
-| RN-08 | `nftables` in `pkgsel/include`; `printf` writes `/etc/nftables.conf`; `systemctl enable nftables.service` |
+| RN-06 | `tasksel` `ssh-server`; `ssh.service` enabled by the package; `Port` from `20-raw-node-port.conf` |
+| RN-07 | `printf` writes `/etc/ssh/sshd_config.d/10-local-auth.conf` and `20-raw-node-port.conf`; Debian includes `sshd_config.d/*.conf` at the top of `sshd_config` |
+| RN-08 | `foomuuri` in `pkgsel/include`; `printf` writes `/etc/foomuuri/00-raw-node.conf`; `systemctl mask nftables.service`; `systemctl enable foomuuri.service` |
 | RN-09 | `python3` in `pkgsel/include` |
 | RN-10 | Partitioning not preseeded, so the partitioner stops for confirmation |
 | RN-11 | Only crypt hashes and the public key appear in the file |
@@ -105,11 +109,13 @@ Run the baseline [acceptance checks](raw-node-baseline.md#acceptance-checks), th
 
 ```sh
 systemctl status ssh
+systemctl status foomuuri foomuuri-boot
+journalctl -b -u foomuuri -u networking
 hostnamectl --static
 grep 127.0.1.1 /etc/hosts
 ```
 
-`ssh.service` should be active and enabled. The hostname should be `deb13-vt-` followed by four hexadecimal digits, and the `127.0.1.1` line in `/etc/hosts` should carry the same name.
+`ssh.service` should be active and enabled. `foomuuri.service` should be active, and in the journal it should start before `networking.service`. `foomuuri-boot.service` is skipped at first boot and active from the second boot on. The hostname should be `deb13-vt-` followed by four hexadecimal digits, and the `127.0.1.1` line in `/etc/hosts` should carry the same name.
 
 ## Review history
 
@@ -125,12 +131,20 @@ grep 127.0.1.1 /etc/hosts
 | Base64 embedding | Replaced in 0.3.0 | Canonical files are written with readable `printf` lines. |
 | Hostname | Changed in 0.3.0 | `deb13-vt` plus a MAC suffix at first boot, replacing `debian-server`. |
 | First-boot report | Added in 0.3.0 | RN-12. |
+| Firewall | Replaced in 0.3.0 | Foomuuri with `/etc/foomuuri/00-raw-node.conf` instead of `/etc/nftables.conf`. `nftables.service` masked. |
+| SSH port | Added in 0.3.0 | `20-raw-node-port.conf`, from the `ssh_port` input. |
 
 ## Qualification
 
 This is a reviewed configuration template, not yet a tested turnkey installer. Validate it in an Incus virtual machine before using it on physical hardware.
 
 ## Change log
+
+### 0.3.0, 2026-11-15
+
+- Firewall changed to Foomuuri: `foomuuri` added to the packages, `/etc/foomuuri/00-raw-node.conf` written instead of `/etc/nftables.conf`, `nftables.service` masked, `foomuuri.service` enabled.
+- SSH port drop-in written from the `ssh_port` input.
+- The confirmation follows the raw node contract 0.1.0. See [contracts.md](contracts.md).
 
 ### 0.3.0, 2026-11-14
 

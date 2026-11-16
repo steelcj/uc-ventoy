@@ -1,5 +1,7 @@
 # Foomuuri -- Handoff etails Regarding Ventoy Ansible Handoff
 
+> Superseded on 2026-11-15. These notes describe the earlier design, in which the answer files shipped a static `nftables.conf` and Ansible installed Foomuuri at handover. Since baseline 0.3.0 every raw node, Ubuntu included, ships Foomuuri from the start, as the raw node contract requires. See [contracts.md](../contracts.md) and [raw-node-baseline.md](../raw-node-baseline.md#firewall). The notes are kept as a record of the reasoning.
+
 ## Do not use Foomuuri on Ubuntu Server
 
 **Ventoy and the answer files: bootstrap only.** Install the OS and create the `initial` account with your SSH key, plus just enough protection to make the node reachable and safe until Ansible first runs. That means keeping the minimal bootstrap firewall (SSH in, everything else dropped). Without it, a freshly installed node with SSH password login enabled sits unprotected until someone runs the playbook. These files stay deliberately small, and they’ll always differ a little between Debian and Ubuntu, because the installers differ.

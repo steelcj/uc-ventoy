@@ -2,7 +2,9 @@
 Description=Raw node first boot: hostname suffix and confirmation report
 Documentation=file:/usr/local/sbin/raw-node-firstboot
 Wants=network-online.target
-After=network-online.target cloud-init.service
+# cloud-init creates the initial user in its network stage, which is named
+# cloud-init.service on Ubuntu 24.04 and cloud-init-network.service on 26.04.
+After=network-online.target cloud-init.service cloud-init-network.service
 ConditionPathExists=!/var/lib/raw-node/confirmation.yml
 
 [Service]

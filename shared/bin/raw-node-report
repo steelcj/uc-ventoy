@@ -1,8 +1,15 @@
 #!/bin/sh
-# raw-node-report: print the minimal raw node confirmation as YAML.
+# raw-node-report: print the raw node confirmation as YAML.
 #
-# Usage: raw-node-report [username]    (default username: initial)
-# Run as root. Every value is measured on this node, not copied from input.
+# The output follows the confirmation format of the raw node contract
+# (RN-REP-01). Every value is measured on this node when the report runs.
+# Only the contract and baseline versions are read from
+# /etc/raw-node/raw-node.conf, where the answer file recorded them.
+#
+# Usage: raw-node-report [username]
+# The user name defaults to RAW_NODE_USER in raw-node.conf, then to initial.
+# Run as root. Without root, sudo is judged from group membership and the
+# firewall table is not looked at.
 # Exit status: 0 if the user exists and can use sudo, 1 otherwise.
 #
 # Written without single quotes or backslashes so that it can be embedded
@@ -13,17 +20,26 @@ set -f
 LC_ALL=C
 export LC_ALL
 
-user="${1:-initial}"
+conf="${RAW_NODE_CONF:-/etc/raw-node/raw-node.conf}"
+sysfs="${RAW_NODE_SYSFS:-/sys}"
 
-# Print the source address the kernel would use to reach a destination.
-# ip route get sends no packets. Documentation addresses are used as
-# destinations so that no real host is involved.
-src_of() {
-    # Word splitting of the ip output is intended.
-    # shellcheck disable=SC2046
-    set -- $(ip "$1" route get "$2" 2>/dev/null)
+RAW_NODE_USER=initial
+RAW_NODE_CONTRACT=""
+RAW_NODE_BASELINE=""
+if [ -r "$conf" ]; then
+    # Written by the answer file at install time.
+    # shellcheck source=/dev/null
+    . "$conf"
+fi
+user="${1:-$RAW_NODE_USER}"
+
+# Print the word that follows a keyword, for example the address after
+# permaddr in a line of ip output. Prints nothing when the keyword is absent.
+word_after() {
+    key="$1"
+    shift
     while [ "$#" -gt 1 ]; do
-        if [ "$1" = "src" ]; then
+        if [ "$1" = "$key" ]; then
             echo "$2"
             return 0
         fi
@@ -32,10 +48,151 @@ src_of() {
     return 0
 }
 
+# Print every address that follows a keyword (inet or inet6) in ip -o addr
+# output as a YAML flow list, without prefix lengths: [a, b] or [].
+flow_list() {
+    key="$1"
+    shift
+    list=""
+    while [ "$#" -gt 1 ]; do
+        if [ "$1" = "$key" ]; then
+            if [ -z "$list" ]; then
+                list="${2%%/*}"
+            else
+                list="$list, ${2%%/*}"
+            fi
+        fi
+        shift
+    done
+    echo "[$list]"
+}
+
+# Print the port in the configuration that sshd itself reads. sshd -G prints
+# the effective configuration without host keys or the privilege separation
+# directory, which Ubuntu only creates when the first connection starts sshd.
+# sshd -T is the fallback for OpenSSH older than 9.2.
+sshd_port() {
+    sshd="$(command -v sshd 2>/dev/null)"
+    if [ -z "$sshd" ]; then
+        sshd=/usr/sbin/sshd
+    fi
+    if [ ! -x "$sshd" ]; then
+        return 0
+    fi
+    # Word splitting of the sshd output is intended.
+    # shellcheck disable=SC2046
+    set -- $("$sshd" -G 2>/dev/null | grep "^port ")
+    if [ "$#" -lt 2 ]; then
+        # shellcheck disable=SC2046
+        set -- $("$sshd" -T 2>/dev/null | grep "^port ")
+    fi
+    if [ "$#" -ge 2 ]; then
+        echo "$2"
+    fi
+    return 0
+}
+
+# Succeed when the named firewall manager is running.
+manager_active() {
+    systemctl is-active --quiet "$1.service" 2>/dev/null || return 1
+    case "$1" in
+        foomuuri)
+            # The service stays active when its rules are removed by hand,
+            # so as root also require its table.
+            if [ "$(id -u)" -eq 0 ] && command -v nft >/dev/null 2>&1; then
+                nft list table inet foomuuri >/dev/null 2>&1 || return 1
+            fi
+            ;;
+        ufw)
+            # ufw.service is active on Ubuntu even while ufw is switched off.
+            grep -q "^ENABLED=yes" /etc/ufw/ufw.conf 2>/dev/null || return 1
+            ;;
+    esac
+    return 0
+}
+
+# Print ethernet, wireless or other for an interface. Ethernet means an
+# Ethernet device with hardware or a hypervisor behind it. Bridges, bonds,
+# VLANs, tunnels and container veth pairs are reported as other.
+iface_type() {
+    net="$sysfs/class/net/$1"
+    if [ -d "$net/wireless" ] || [ -e "$net/phy80211" ]; then
+        echo wireless
+        return 0
+    fi
+    # Type 1 is Ethernet. A device link means there is hardware or a
+    # hypervisor device, and such devices carry no DEVTYPE.
+    if [ -e "$net/device" ] && [ "$(cat "$net/type" 2>/dev/null)" = "1" ]; then
+        if ! grep -q "^DEVTYPE=" "$net/uevent" 2>/dev/null; then
+            echo ethernet
+            return 0
+        fi
+    fi
+    echo other
+    return 0
+}
+
+# Print the interfaces list, one YAML block per interface except loopback.
+list_interfaces() {
+    set +f
+    set -- "$sysfs"/class/net/*
+    set -f
+    for path in "$@"; do
+        dev="${path##*/}"
+        if [ ! -d "$path" ] || [ "$dev" = "lo" ]; then
+            continue
+        fi
+
+        # ip prints permaddr only when the address in use differs from the
+        # permanent one, for example after MAC randomisation.
+        # shellcheck disable=SC2046
+        mac="$(word_after permaddr $(ip -o link show dev "$dev" 2>/dev/null))"
+        if [ -z "$mac" ]; then
+            mac="$(cat "$sysfs/class/net/$dev/address" 2>/dev/null)"
+        fi
+
+        state=down
+        case "$(cat "$sysfs/class/net/$dev/operstate" 2>/dev/null)" in
+            up)
+                state=up
+                ;;
+            unknown)
+                # Some drivers never report an operational state.
+                if [ "$(cat "$sysfs/class/net/$dev/carrier" 2>/dev/null)" = "1" ]; then
+                    state=up
+                fi
+                ;;
+        esac
+
+        route4=false
+        if [ -n "$(ip -4 route show default dev "$dev" 2>/dev/null)" ]; then
+            route4=true
+        fi
+        route6=false
+        if [ -n "$(ip -6 route show default dev "$dev" 2>/dev/null)" ]; then
+            route6=true
+        fi
+
+        # shellcheck disable=SC2046
+        ip4="$(flow_list inet $(ip -4 -o addr show dev "$dev" 2>/dev/null))"
+        # shellcheck disable=SC2046
+        ip6="$(flow_list inet6 $(ip -6 -o addr show dev "$dev" scope global 2>/dev/null))"
+
+        echo "    - name: $dev"
+        echo "      type: $(iface_type "$dev")"
+        echo "      mac: $mac"
+        echo "      state: $state"
+        echo "      default_route4: $route4"
+        echo "      default_route6: $route6"
+        echo "      ip: $ip4"
+        echo "      ip6: $ip6"
+    done
+    return 0
+}
+
 host="$(hostname)"
 timestamp="$(date --iso-8601=seconds)"
-ip4="$(src_of -4 192.0.2.1)"
-ip6="$(src_of -6 2001:db8::1)"
+machine_id="$(cat /etc/machine-id 2>/dev/null)"
 
 if id -u "$user" >/dev/null 2>&1; then
     user_ok=true
@@ -64,12 +221,54 @@ else
     user_value=""
 fi
 
+ssh_port="$(sshd_port)"
+
+# The firewall manager is the first known manager that is running. When none
+# is running, it is the first one that is enabled.
+firewall=""
+firewall_active=false
+for name in foomuuri firewalld ufw nftables; do
+    if manager_active "$name"; then
+        firewall="$name"
+        firewall_active=true
+        break
+    fi
+done
+if [ -z "$firewall" ]; then
+    for name in foomuuri firewalld ufw nftables; do
+        if systemctl is-enabled --quiet "$name.service" 2>/dev/null; then
+            firewall="$name"
+            break
+        fi
+    done
+fi
+
+python=""
+if [ -x /usr/bin/python3 ]; then
+    python=/usr/bin/python3
+else
+    python="$(command -v python3 2>/dev/null)"
+fi
+
+interfaces="$(list_interfaces)"
+
 echo "$host:"
+echo "  contract: $RAW_NODE_CONTRACT"
+echo "  baseline: $RAW_NODE_BASELINE"
 echo "  timestamp: $timestamp"
-echo "  ip: $ip4"
-echo "  ip6: $ip6"
+echo "  machine_id: $machine_id"
 echo "  user: $user_value"
 echo "  sudo: $has_sudo"
+echo "  ssh_port: $ssh_port"
+echo "  firewall: $firewall"
+echo "  firewall_active: $firewall_active"
+echo "  python: $python"
+if [ -n "$interfaces" ]; then
+    echo "  interfaces:"
+    echo "$interfaces"
+else
+    echo "  interfaces: []"
+fi
 
 if [ "$user_ok" = true ] && [ "$has_sudo" = true ]; then
     exit 0

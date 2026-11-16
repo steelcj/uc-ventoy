@@ -46,7 +46,7 @@ d-i passwd/user-password-crypted password {{ initial_password_hash }}
 ### Package selection
 
 tasksel tasksel/first multiselect standard, ssh-server
-d-i pkgsel/include string sudo nftables python3
+d-i pkgsel/include string sudo nftables python3 foomuuri
 d-i pkgsel/upgrade select none
 d-i pkgsel/update-policy select none
 popularity-contest popularity-contest/participate boolean false
@@ -54,6 +54,13 @@ popularity-contest popularity-contest/participate boolean false
 ### Boot loader
 
 d-i grub-installer/only_debian boolean true
+
+### Firewall
+
+# Every raw node gets the same Foomuuri firewall, rendered by bin/build from
+# shared/foomuuri/00-raw-node.conf.j2. nftables.service is masked because its
+# stop action flushes the whole ruleset. foomuuri.service starts
+# foomuuri-boot.service by itself, so only foomuuri.service is enabled.
 
 ### Post-install configuration
 
@@ -64,12 +71,14 @@ d-i preseed/late_command string \
     in-target chown {{ initial_username }}:{{ initial_username }} /home/{{ initial_username }}/.ssh/authorized_keys; \
     in-target chmod 0600 /home/{{ initial_username }}/.ssh/authorized_keys; \
 {{ write("shared/ssh/10-local-auth.conf", "/etc/ssh/sshd_config.d/10-local-auth.conf", "0644") }}
-{{ write("shared/nftables/nftables.conf", "/etc/nftables.conf", "0755") }}
+{{ write_text(ssh_port_conf, "/etc/ssh/sshd_config.d/20-raw-node-port.conf", "0644") }}
+{{ write_text(foomuuri_conf, "/etc/foomuuri/00-raw-node.conf", "0644") }}
 {{ write("shared/bin/raw-node-report", "/usr/local/sbin/raw-node-report", "0755") }}
 {{ write("shared/bin/raw-node-firstboot", "/usr/local/sbin/raw-node-firstboot", "0755") }}
 {{ write("shared/systemd/raw-node-firstboot.service", "/etc/systemd/system/raw-node-firstboot.service", "0644") }}
 {{ write_text(raw_node_conf, "/etc/raw-node/raw-node.conf", "0644") }}
-    in-target systemctl enable nftables.service raw-node-firstboot.service
+    in-target systemctl mask nftables.service; \
+    in-target systemctl enable foomuuri.service raw-node-firstboot.service
 
 ### Finish
 

@@ -1,0 +1,28 @@
+# Raw node firewall, written by the raw node answer file.
+# Rendered by bin/build from shared/foomuuri/00-raw-node.conf.j2.
+# Raw node contract clauses RN-FW-01 to RN-FW-04 and RN-FWM-01.
+#
+# In: SSH, DHCP and DHCPv6 replies, ping. Out: everything. Forwarded: nothing.
+# Foomuuri adds the ICMP and ICMPv6 that networking needs by itself.
+#
+# The public zone lists interface name patterns: en* (wired), eth* (virtual
+# machines and containers) and wl* (wireless). The catch-all pattern needs
+# Foomuuri 0.33 or later, and the targets ship 0.22, 0.27 and 0.31. An
+# interface outside these patterns is in no zone: nothing comes in through
+# it and nothing goes out through it.
+
+zone {
+  localhost
+  public en* eth* wl*
+}
+
+public-localhost {
+  dhcp-client
+  dhcpv6-client
+  ping
+  {{ "ssh" if ssh_port == 22 else "tcp " ~ ssh_port }}{{ (" saddr " ~ (ssh_sources | join(" "))) if ssh_sources else "" }}
+}
+
+localhost-public {
+  accept
+}

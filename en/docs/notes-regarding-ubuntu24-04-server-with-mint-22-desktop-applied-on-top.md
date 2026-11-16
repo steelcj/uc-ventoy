@@ -14,7 +14,7 @@ Yes. 24.04.5 is a fine base for a Mint 22 desktop, and it's the best 24.04 ISO t
 - **cloud-init:** it stays installed from the server install. It's harmless, or you can turn it off with `touch /etc/cloud/cloud-init.disabled` once the system is built.
 - **Upgrades:** the result is an unsupported hybrid. Mint's upgrade tool assumes a real Mint install, so moving to Mint 23 (based on 26.04) later will most likely mean rebuilding rather than upgrading.
 
-The node baseline itself (accounts, SSH drop-in, `nftables.conf`) needs no changes. The only edit to the 24.04 document is the ISO filename in the directory tree and `ventoy.json`.
+The node baseline itself (accounts, SSH drop-in, firewall) needs no changes. The only edit to the 24.04 document is the ISO filename in the directory tree and `ventoy.json`.
 
 Want me to issue v0.1.2 with the 24.04.5 filename? I can also add an optional "Mint 22 desktop overlay" section covering the repository setup, the netplan switch, and the `ufw` and `snapd` handling.
 

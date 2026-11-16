@@ -1,6 +1,6 @@
 # ventoy-raw-node
 
-Generator for Ventoy answer files that build a raw node: the minimal, identical starting state of every server before Ansible takes over. See `docs/ventoy-raw-node-baseline-v0.2.0.md` for the definition.
+Generator for Ventoy answer files that build a raw node: the minimal, identical starting state of every server before Ansible takes over. See [en/docs/raw-node-baseline.md](en/docs/raw-node-baseline.md) for the definition, and [en/docs/contracts.md](en/docs/contracts.md) for the raw node contract that every node fulfils.
 
 Run it on your workstation. Only its output goes on the Ventoy stick.
 
@@ -174,7 +174,7 @@ See [Installing shellcheck](https://github.com/koalaman/shellcheck#installing)
 
 ### raw-node-input.yml
 
-Before building your Ventoy automated installer you need to prepare the four variables that the build process requires for the out of box compatibility of the builder.
+Before building your Ventoy automated installer you need to prepare the four variables that the build process requires for the out of box compatibility of the builder. Two more are optional: `ssh_port` (default 22) and `ssh_sources` (default empty, meaning SSH is reachable from anywhere). `raw-node-input.example.yml` explains both.
 
 I edit  `raw-node-input.yml`directly and once everything is working as it should I copy it to `raw-node-input.example.yml` just in case it gets clobbered by some other developer or automation tool.
 
@@ -227,38 +227,43 @@ if your using a venv, activate it now.
 Output example:
 
 ```bash
-warning: nft -c needs root; check the ruleset once with: sudo nft -c -f shared/nftables/nftables.conf
+warning: foomuuri not found, raw node firewall not checked (sudo apt install foomuuri)
+Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
 warning: shellcheck not found, shared scripts not linted (sudo apt install shellcheck)
+Report: raw-node-report prints valid YAML with the contract 0.1.0 fields (3 interfaces on this workstation), self-test OK
 Targets:
-  debian/13: preseed.cfg, hostname deb13-vt-xxxx, 6 files embedded, self-test OK
-  ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 7 files embedded, self-test OK
-  ubuntu/26.04: user-data, hostname ub2604-vt-xxxx, 7 files embedded, self-test OK
+  debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
+  ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 9 files embedded, self-test OK
+  ubuntu/26.04: user-data, hostname ub2604-vt-xxxx, 9 files embedded, self-test OK
 
 Wrote build/answer-files/ and build/ventoy/ventoy.json
 ```
 
-#### nftables (optional)
+#### foomuuri (optional)
 
 A useful tool for developers, CI automations or editing the included firewall configuration.
 
-This setup is designed to work with as many linux distro's as possible to it ships with support for an nftables firewall. If you are modifying the default firewall configuration (port 22 only at this point in time) the you are going to want to ensure that your firewall configuration is valid. You do that with a utility called `nft`
+Every raw node gets the same small Foomuuri firewall: SSH, DHCP and ping in, everything out. `bin/build` renders it once from `shared/foomuuri/00-raw-node.conf.j2`, using `ssh_port` and `ssh_sources` from your `raw-node-input.yml`, and embeds the same file in every answer file.
 
-If you have a look at the output example above you will see the command you want to run in order to do this. Run it now if you want to confirm that the out of the box firewall configuration in this project is valid.
-
-The `nft` command requires **sudo** (or root privileges) because it interacts directly with the **Linux kernel** via the **libnftnl API** to manage the firewall's packet filtering rules.  Access from userland to the kernel is restricted to prevent unauthorized modification of network security policies.
-
-In other words you have to use sudo for this one my friend!
+If Foomuuri is installed on your workstation (`sudo apt install foomuuri`), `bin/build` asks it to check the rendered file. Foomuuri hands the generated rules to `nft`, which talks to the kernel and therefore needs **sudo**. Without sudo the build only warns, as in the output example above. Run the full check once, and again whenever you change the firewall template, `ssh_port` or `ssh_sources`:
 
 ```bash
-sudo nft -c -f shared/nftables/nftables.conf
-echo $?
+sudo bin/build --check-firewall-only
 ```
 
 Output example when you are good to go:
 
 ```bash
-0
+Raw node firewall: SSH on port 22 from anywhere, foomuuri check OK
 ```
+
+If you use a Python venv, sudo does not see it. Pass the venv's Python along:
+
+```bash
+sudo "$(command -v python3)" bin/build --check-firewall-only
+```
+
+An invalid firewall file would leave a new node without a firewall at its first boot, so this check is worth the minute it takes.
 
 #### shellcheck (optional)
 
@@ -277,12 +282,14 @@ bin/build --stick /media/initial/Ventoy --dry-run
 Complex output example:
 
 ```bash
-warning: nft -c needs root; check the ruleset once with: sudo nft -c -f shared/nftables/nftables.conf
+warning: foomuuri not found, raw node firewall not checked (sudo apt install foomuuri)
+Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
 warning: shellcheck not found, shared scripts not linted (sudo apt install shellcheck)
+Report: raw-node-report prints valid YAML with the contract 0.1.0 fields (3 interfaces on this workstation), self-test OK
 Targets:
-  debian/13: preseed.cfg, hostname deb13-vt-xxxx, 6 files embedded, self-test OK
-  ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 7 files embedded, self-test OK
-  ubuntu/26.04: user-data, hostname ub2604-vt-xxxx, 7 files embedded, self-test OK
+  debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
+  ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 9 files embedded, self-test OK
+  ubuntu/26.04: user-data, hostname ub2604-vt-xxxx, 9 files embedded, self-test OK
 
 Wrote build/answer-files/ and build/ventoy/ventoy.json
 
@@ -301,7 +308,7 @@ warning: /media/initial/Ventoy/answer-files/ventoy.json is ignored by Ventoy, wh
 
 #### Dry run output notes:
 
-So you can see that it again reminds us of the `nft`and `spellcheck`options for developers and strict CI and automation integrations.
+So you can see that it again reminds us of the `foomuuri` and `shellcheck` options for developers and strict CI and automation integrations.
 
 The other item of note is that it has identified a second ventoy.json file
 
@@ -320,7 +327,7 @@ Requires Python 3 with PyYAML and Jinja2 on your workstations
 When they are installed, optional checks will use:
 
 *  debconf-set-selections
-* nft
+* foomuuri
 * shellcheck and:
 * gpg
 
@@ -335,12 +342,14 @@ bin/build --stick /media/initial/Ventoy
 Output example:
 
 ```bash
-warning: nft -c needs root; check the ruleset once with: sudo nft -c -f shared/nftables/nftables.conf
+warning: foomuuri not found, raw node firewall not checked (sudo apt install foomuuri)
+Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
 warning: shellcheck not found, shared scripts not linted (sudo apt install shellcheck)
+Report: raw-node-report prints valid YAML with the contract 0.1.0 fields (3 interfaces on this workstation), self-test OK
 Targets:
-  debian/13: preseed.cfg, hostname deb13-vt-xxxx, 6 files embedded, self-test OK
-  ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 7 files embedded, self-test OK
-  ubuntu/26.04: user-data, hostname ub2604-vt-xxxx, 7 files embedded, self-test OK
+  debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
+  ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 9 files embedded, self-test OK
+  ubuntu/26.04: user-data, hostname ub2604-vt-xxxx, 9 files embedded, self-test OK
 
 Wrote build/answer-files/ and build/ventoy/ventoy.json
 
@@ -390,13 +399,13 @@ On my test system
 
 ## Layout
 
-- `raw-node-input.yml`: your four values (git-ignored).
-- `shared/`: files written identically on every node: SSH policy, bootstrap firewall, `raw-node-report`, `raw-node-firstboot` and its systemd unit, and a cloud-init setting used on Ubuntu.
+- `raw-node-input.yml`: your four values and the two optional SSH values (git-ignored).
+- `shared/`: files written identically on every node: SSH policy, the Foomuuri firewall template, `raw-node-report`, `raw-node-firstboot` and its systemd unit, and a cloud-init setting and a systemd drop-in used on Ubuntu.
 - `<distro>/<version>/*.j2`: one answer file template per target. A new folder is a new target.
 - `bin/build`: renders every target, embeds the shared files, re-extracts them to prove they arrive byte for byte, and writes `build/`.
 - `build/`: mirrors the stick root: `answer-files/<distro>/<version>/...` and `ventoy/ventoy.json` (the `auto_install` section only).
 - `confirmations/`: the confirmation files collected from nodes.
-- `docs/`: the baseline and target documents.
+- `en/docs/`: the contract coverage, the baseline and the target documents.
 
 ## On the stick
 
@@ -404,4 +413,4 @@ ISOs stay where they are, under `/iso/<distro>/<version>/`. Ventoy matches each 
 
 ## On the node
 
-At first boot, `raw-node-firstboot.service` appends the MAC suffix to the hostname (`deb13-vt` becomes `deb13-vt-a1b2`), writes `/var/lib/raw-node/confirmation.yml`, and shows it at the console login prompt. `sudo raw-node-report` prints it again at any time.
+At first boot, `raw-node-firstboot.service` appends the MAC suffix to the hostname (`deb13-vt` becomes `deb13-vt-a1b2`), writes `/var/lib/raw-node/confirmation.yml` in the format of the raw node contract, and shows it at the console login prompt. `sudo raw-node-report` prints it again at any time.

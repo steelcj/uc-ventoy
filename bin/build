@@ -6,6 +6,7 @@ Usage:
     bin/build                                  render into build/ and self-test
     bin/build --stick /media/initial/Ventoy    also install on the stick
     bin/build --stick PATH --dry-run           show what would change on the stick
+    sudo bin/build --check-firewall-only       check the raw node firewall, then stop
 
 Targets are discovered from the folder layout: <distro>/<version>/<file>.j2,
 for example debian/13/preseed.cfg.j2. The output mirrors the root of the
@@ -17,12 +18,20 @@ Ventoy data partition:
 ISO checksums are not checked here. Verify ISOs where they are stored, before
 copying them to the stick, with bin/check-isos.
 
+Every raw node gets the same Foomuuri firewall. It is rendered once from
+shared/foomuuri/00-raw-node.conf.j2 and embedded identically in every answer
+file. SSH is opened on ssh_port and limited to ssh_sources when that is set.
+Foomuuri checks the rendered file when it is installed on the workstation.
+The nftables part of that check needs root, so run it once with
+--check-firewall-only after changing the firewall or the SSH inputs.
+
 Requires Python 3 with PyYAML and Jinja2:
     sudo apt install python3-yaml python3-jinja2
 """
 
 import argparse
 import datetime
+import ipaddress
 import json
 import os
 import re
@@ -40,7 +49,10 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
-BASELINE_VERSION = "0.2.0"
+# The uc-ventoy baseline, and the raw node contract version it implements.
+# Both are recorded on every node in /etc/raw-node/raw-node.conf.
+BASELINE_VERSION = "0.3.0"
+CONTRACT_VERSION = "0.1.0"
 
 # Template file name -> (installer kind, answer file name on the stick)
 TEMPLATES = {
@@ -52,6 +64,22 @@ DISTRO_PREFIX = {"debian": "deb", "ubuntu": "ub", "fedora": "fed", "rocky": "roc
 NOT_TARGETS = {"shared", "bin", "build", "docs", "confirmations"}
 
 REQUIRED_KEYS = ["root_password_hash", "initial_username", "initial_password_hash", "ssh_public_key"]
+# Optional keys and their defaults. Both shape the raw node firewall and sshd.
+OPTIONAL_KEYS = {"ssh_port": 22, "ssh_sources": []}
+FOOMUURI_TEMPLATE = "shared/foomuuri/00-raw-node.conf.j2"
+FOOMUURI_DEST = "/etc/foomuuri/00-raw-node.conf"
+SSH_PORT_DEST = "/etc/ssh/sshd_config.d/20-raw-node-port.conf"
+# Every target must write these files, and none may write the old firewall.
+REQUIRED_DESTS = [
+    "/etc/ssh/sshd_config.d/10-local-auth.conf", SSH_PORT_DEST, FOOMUURI_DEST,
+    "/usr/local/sbin/raw-node-report", "/usr/local/sbin/raw-node-firstboot",
+    "/etc/systemd/system/raw-node-firstboot.service", "/etc/raw-node/raw-node.conf",
+]
+RETIRED_DESTS = ["/etc/nftables.conf"]
+# The confirmation fields of the raw node contract, in the order it shows them.
+REPORT_FIELDS = ["contract", "baseline", "timestamp", "machine_id", "user", "sudo", "ssh_port",
+                 "firewall", "firewall_active", "python", "interfaces"]
+INTERFACE_FIELDS = ["name", "type", "mac", "state", "default_route4", "default_route6", "ip", "ip6"]
 HASH_RE = re.compile(r"^\$[0-9a-z]+\$\S+$")
 USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 KEY_RE = re.compile(
@@ -98,7 +126,8 @@ def load_input(path, allow_dummy, p):
         if "DUMMY" in value and not allow_dummy:
             p.error(f"{path.name}: {key} still holds the dummy value (use --allow-dummy only for test builds)")
         values[key] = value
-    extra = set(data) - set(REQUIRED_KEYS)
+    load_optional(data, values, path, p)
+    extra = set(data) - set(REQUIRED_KEYS) - set(OPTIONAL_KEYS)
     if extra:
         p.warn(f"{path.name}: ignoring unknown keys: {', '.join(sorted(extra))}")
     if "root_password_hash" in values and not HASH_RE.match(values["root_password_hash"]):
@@ -113,12 +142,37 @@ def load_input(path, allow_dummy, p):
     return values
 
 
-def read_shared(rel, p):
-    path = ROOT / rel
-    if not path.is_file():
-        p.error(f"{rel}: file not found")
-        return ""
-    text = path.read_text()
+def load_optional(data, values, path, p):
+    port = data.get("ssh_port")
+    if port is None:
+        port = OPTIONAL_KEYS["ssh_port"]
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        p.error(f"{path.name}: ssh_port must be a whole number from 1 to 65535")
+        port = OPTIONAL_KEYS["ssh_port"]
+    values["ssh_port"] = port
+
+    sources = data.get("ssh_sources")
+    if sources is None:
+        sources = []
+    if not isinstance(sources, list):
+        p.error(f"{path.name}: ssh_sources must be a list of addresses or networks")
+        sources = []
+    clean = []
+    for item in sources:
+        try:
+            # strict=True refuses host bits, such as 192.0.2.1/24, which are
+            # usually a typing mistake. A bare address becomes a /32 or /128.
+            network = str(ipaddress.ip_network(str(item).strip(), strict=True))
+        except ValueError as exc:
+            p.error(f"{path.name}: ssh_sources entry {item!r} is not an address or network: {exc}")
+            continue
+        if network not in clean:
+            clean.append(network)
+    values["ssh_sources"] = clean
+
+
+def check_embeddable(rel, text, p):
+    """Text written to a node must survive both installer formats."""
     if not text.endswith("\n"):
         p.error(f"{rel}: must end with a line break")
     for n, line in enumerate(text.split("\n")[:-1], 1):
@@ -129,6 +183,69 @@ def read_shared(rel, p):
         if line == "EOF":
             p.error(f"{rel}:{n}: a line reading EOF would end the Ubuntu heredoc early")
     return text
+
+
+def read_shared(rel, p):
+    path = ROOT / rel
+    if not path.is_file():
+        p.error(f"{rel}: file not found")
+        return ""
+    return check_embeddable(rel, path.read_text(), p)
+
+
+def jinja_env():
+    return jinja2.Environment(
+        loader=jinja2.FileSystemLoader(str(ROOT)),
+        undefined=jinja2.StrictUndefined,
+        keep_trailing_newline=True,
+        autoescape=False,
+    )
+
+
+def render_firewall(values, p):
+    """Render the raw node Foomuuri file once. Every target embeds the same text."""
+    if not (ROOT / FOOMUURI_TEMPLATE).is_file():
+        p.error(f"{FOOMUURI_TEMPLATE}: file not found")
+        return ""
+    text = jinja_env().get_template(FOOMUURI_TEMPLATE).render(
+        ssh_port=values["ssh_port"], ssh_sources=values["ssh_sources"])
+    return check_embeddable(FOOMUURI_TEMPLATE, text, p)
+
+
+def check_firewall(text, p, required=False):
+    """Check the rendered Foomuuri file with Foomuuri itself.
+
+    Returns True only when Foomuuri parsed the file and nftables accepted the
+    ruleset it generates, which needs root. With required=True, anything less
+    is an error instead of a warning.
+    """
+    problem = p.error if required else p.warn
+    rerun = "sudo bin/build --check-firewall-only"
+    foomuuri = shutil.which("foomuuri") or ("/usr/sbin/foomuuri" if Path("/usr/sbin/foomuuri").exists() else None)
+    if not foomuuri:
+        problem("foomuuri not found, raw node firewall not checked (sudo apt install foomuuri)")
+        return False
+    with tempfile.TemporaryDirectory() as tmp:
+        for sub in ("etc", "state", "run"):
+            os.makedirs(f"{tmp}/{sub}")
+        Path(f"{tmp}/etc/00-raw-node.conf").write_text(text)
+        r = subprocess.run(
+            [foomuuri, f"--set=etc_dir={tmp}/etc", f"--set=state_dir={tmp}/state",
+             f"--set=run_dir={tmp}/run", "check"],
+            capture_output=True, text=True)
+    out = (r.stdout + r.stderr).strip()
+    is_root = os.geteuid() == 0
+    if r.returncode != 0 and (is_root or "permitted" not in out.lower()):
+        p.error(f"{FOOMUURI_TEMPLATE}: foomuuri check failed:\n{out}")
+        return False
+    if not is_root:
+        # Without root, Foomuuri 0.22 fails in nft with a permission error, and
+        # later versions skip nft and still report success. Either way the
+        # generated ruleset has not been checked by nftables.
+        problem("foomuuri check needs root for its nftables check; "
+                f"check the raw node firewall once with: {rerun}")
+        return False
+    return True
 
 
 def preseed_writer(content, dest, mode):
@@ -164,7 +281,7 @@ def discover_targets():
     return targets
 
 
-def render(target, values, p):
+def render(target, values, foomuuri_conf, p):
     files = []  # (dest, content, mode) written on the node, for the self-test
 
     writer = preseed_writer if target["kind"] == "preseed" else autoinstall_writer
@@ -179,22 +296,35 @@ def render(target, values, p):
         return writer(content, dest, mode)
 
     raw_node_conf = (
-        "# Written by the raw node answer file. Read by raw-node-firstboot.\n"
+        "# Written by the raw node answer file.\n"
+        "# Read by raw-node-firstboot and raw-node-report.\n"
         f"RAW_NODE_USER={values['initial_username']}\n"
         f"RAW_NODE_TARGET={target['rel']}\n"
         f"RAW_NODE_BASELINE={BASELINE_VERSION}\n"
+        f"RAW_NODE_CONTRACT={CONTRACT_VERSION}\n"
     )
-    env = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(ROOT)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-        autoescape=False,
+    # Written even for port 22, so the port a node listens on is never implied.
+    ssh_port_conf = (
+        "# Written by the raw node answer file. Must match the firewall.\n"
+        f"Port {values['ssh_port']}\n"
     )
-    tpl = env.get_template(str(target["template"].relative_to(ROOT)))
+    tpl = jinja_env().get_template(str(target["template"].relative_to(ROOT)))
     text = tpl.render(
         write=write, write_text=write_text, raw_node_conf=raw_node_conf,
+        foomuuri_conf=foomuuri_conf, ssh_port_conf=ssh_port_conf,
         hostname_base=target["hostname_base"], **values,
     )
+    dests = [dest for dest, _content, _mode in files]
+    label = f"{target['rel']}/{target['answer_name']}"
+    for dest in REQUIRED_DESTS:
+        if dests.count(dest) != 1:
+            p.error(f"{label}: template must write {dest} exactly once")
+    for dest in RETIRED_DESTS:
+        if dest in dests:
+            p.error(f"{label}: template still writes {dest}, which the raw node no longer has")
+    for dest, content, _mode in files:
+        if dest == FOOMUURI_DEST and content != foomuuri_conf:
+            p.error(f"{label}: {dest} is not the firewall rendered from {FOOMUURI_TEMPLATE}")
     return text, files
 
 
@@ -267,18 +397,70 @@ def selftest_autoinstall(text, files, label, p):
             compare_written(tmp, files, label, p)
 
 
+def selftest_report(p):
+    """Run raw-node-report on this workstation and check what it prints.
+
+    The report only reads, so it is safe to run here. The check is that the
+    output is valid YAML with the confirmation fields of the raw node
+    contract, in the contract's order and with the contract's types. The
+    values describe the workstation and are not judged.
+    """
+    rel = "shared/bin/raw-node-report"
+    if not shutil.which("ip"):
+        p.warn(f"{rel}: ip not found, report output not checked")
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        conf = Path(tmp) / "raw-node.conf"
+        conf.write_text(f"RAW_NODE_USER=initial\nRAW_NODE_BASELINE={BASELINE_VERSION}\n"
+                        f"RAW_NODE_CONTRACT={CONTRACT_VERSION}\n")
+        r = subprocess.run(["sh", str(ROOT / rel)], capture_output=True, text=True,
+                           env={**os.environ, "RAW_NODE_CONF": str(conf)})
+    if r.returncode not in (0, 1) or r.stderr.strip():
+        p.error(f"{rel}: self-test run failed with status {r.returncode}: {r.stderr.strip()}")
+        return None
+    try:
+        data = yaml.safe_load(r.stdout)
+    except yaml.YAMLError as exc:
+        p.error(f"{rel}: output is not valid YAML: {exc}")
+        return None
+    if not isinstance(data, dict) or len(data) != 1:
+        p.error(f"{rel}: output must be one mapping keyed by the hostname")
+        return None
+    report = next(iter(data.values()))
+    if not isinstance(report, dict) or list(report) != REPORT_FIELDS:
+        p.error(f"{rel}: fields are {list(report) if isinstance(report, dict) else report!r}, "
+                f"expected {REPORT_FIELDS}")
+        return None
+    if report["contract"] != CONTRACT_VERSION or report["baseline"] != BASELINE_VERSION:
+        p.error(f"{rel}: contract and baseline were not read from raw-node.conf")
+    for key in ("sudo", "firewall_active"):
+        if not isinstance(report[key], bool):
+            p.error(f"{rel}: {key} must be true or false, got {report[key]!r}")
+    if report["ssh_port"] is not None and not isinstance(report["ssh_port"], int):
+        p.error(f"{rel}: ssh_port must be a number or empty, got {report['ssh_port']!r}")
+    interfaces = report["interfaces"]
+    if not isinstance(interfaces, list):
+        p.error(f"{rel}: interfaces must be a list")
+        return None
+    for iface in interfaces:
+        name = iface.get("name") if isinstance(iface, dict) else iface
+        if not isinstance(iface, dict) or list(iface) != INTERFACE_FIELDS:
+            p.error(f"{rel}: interface {name!r} does not have the fields {INTERFACE_FIELDS}")
+            continue
+        if iface["type"] not in ("ethernet", "wireless", "other"):
+            p.error(f"{rel}: interface {name}: type is {iface['type']!r}")
+        if iface["state"] not in ("up", "down"):
+            p.error(f"{rel}: interface {name}: state is {iface['state']!r}")
+        for key in ("default_route4", "default_route6"):
+            if not isinstance(iface[key], bool):
+                p.error(f"{rel}: interface {name}: {key} must be true or false")
+        for key in ("ip", "ip6"):
+            if not isinstance(iface[key], list):
+                p.error(f"{rel}: interface {name}: {key} must be a list")
+    return len(interfaces)
+
+
 def check_tools(p):
-    nft_src = ROOT / "shared/nftables/nftables.conf"
-    if shutil.which("nft"):
-        r = subprocess.run(["nft", "-c", "-f", str(nft_src)], capture_output=True, text=True)
-        if r.returncode != 0:
-            if "permitted" in r.stderr.lower():
-                p.warn("nft -c needs root; check the ruleset once with: "
-                       "sudo nft -c -f shared/nftables/nftables.conf")
-            else:
-                p.error(f"shared/nftables/nftables.conf: nft -c failed: {r.stderr.strip()}")
-    else:
-        p.warn("nft not found, firewall ruleset not checked")
     if shutil.which("shellcheck"):
         for script in sorted((ROOT / "shared/bin").iterdir()):
             r = subprocess.run(["shellcheck", "-s", "sh", str(script)], capture_output=True, text=True)
@@ -348,10 +530,22 @@ def main():
     ap.add_argument("--allow-dummy", action="store_true", help="accept DUMMY values (test builds only)")
     ap.add_argument("--stick", type=Path, help="Ventoy data partition, e.g. /media/initial/Ventoy")
     ap.add_argument("--dry-run", action="store_true", help="with --stick: show changes, write nothing")
+    ap.add_argument("--check-firewall-only", action="store_true",
+                    help="render the raw node firewall, check it with foomuuri, then stop (needs root)")
     args = ap.parse_args()
 
     p = Problems()
     values = load_input(args.input, args.allow_dummy, p)
+    foomuuri_conf = render_firewall(values, p)
+    p.report_and_exit_on_error()
+    checked = check_firewall(foomuuri_conf, p, required=args.check_firewall_only)
+    p.report_and_exit_on_error()
+    print(f"Raw node firewall: SSH on port {values['ssh_port']} "
+          f"from {', '.join(values['ssh_sources']) or 'anywhere'}, "
+          f"{'foomuuri check OK' if checked else 'not checked by nftables'}")
+    if args.check_firewall_only:
+        return
+
     targets = discover_targets()
     if not targets:
         sys.exit("error: no targets found (expected <distro>/<version>/*.j2)")
@@ -361,12 +555,17 @@ def main():
 
     check_tools(p)
     p.report_and_exit_on_error()
+    interfaces = selftest_report(p)
+    p.report_and_exit_on_error()
+    if interfaces is not None:
+        print(f"Report: raw-node-report prints valid YAML with the contract {CONTRACT_VERSION} fields "
+              f"({interfaces} interfaces on this workstation), self-test OK")
 
     print("Targets:")
     auto_install = []
     for t in targets:
         label = f"{t['rel']}/{t['answer_name']}"
-        text, files = render(t, values, p)
+        text, files = render(t, values, foomuuri_conf, p)
         p.report_and_exit_on_error()
         if t["kind"] == "preseed":
             selftest_preseed(text, files, values, label, p)

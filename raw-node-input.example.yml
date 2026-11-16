@@ -1,5 +1,5 @@
 # raw-node-input.yml: the only file you edit.
-# Copy this file to raw-node-input.yml and replace the four values.
+# Copy this file to raw-node-input.yml and replace the four required values.
 # raw-node-input.yml is git-ignored because it holds password hashes.
 #
 # Hashes:  mkpasswd --method=sha-512   (package: whois)
@@ -9,3 +9,18 @@ root_password_hash: "$6$DUMMYSALT$DUMMYROOTHASH"
 initial_username: initial
 initial_password_hash: "$6$DUMMYSALT$DUMMYUSERHASH"
 ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY operator@workstation"
+
+# Optional. Both values shape the firewall and sshd on every raw node, and
+# the Ansible controller must be given the same values.
+#
+# ssh_port: the port sshd listens on and the firewall opens. Default 22.
+# ssh_sources: the addresses or networks allowed to reach SSH. Default empty,
+# which means any. Each entry is an IPv4 or IPv6 address or network. A bare
+# address means that one host. Host bits are refused, so write 192.0.2.0/24,
+# not 192.0.2.1/24. With only IPv4 entries, SSH over IPv6 is closed, and the
+# other way round.
+
+#ssh_port: 22
+#ssh_sources:
+#  - 192.0.2.0/24
+#  - 2001:db8::/32

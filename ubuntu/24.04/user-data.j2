@@ -30,10 +30,14 @@ autoinstall:
   packages:
     - nftables
     - python3
+    # From the universe component, so the installer needs network access.
+    - foomuuri
 
   late-commands:
 {{ write("shared/ssh/10-local-auth.conf", "/etc/ssh/sshd_config.d/10-local-auth.conf", "0644") }}
-{{ write("shared/nftables/nftables.conf", "/etc/nftables.conf", "0755") }}
+{{ write_text(ssh_port_conf, "/etc/ssh/sshd_config.d/20-raw-node-port.conf", "0644") }}
+{{ write_text(foomuuri_conf, "/etc/foomuuri/00-raw-node.conf", "0644") }}
+{{ write("shared/systemd/foomuuri-raw-node.conf", "/etc/systemd/system/foomuuri.service.d/10-raw-node.conf", "0644") }}
 {{ write("shared/bin/raw-node-report", "/usr/local/sbin/raw-node-report", "0755") }}
 {{ write("shared/bin/raw-node-firstboot", "/usr/local/sbin/raw-node-firstboot", "0755") }}
 {{ write("shared/systemd/raw-node-firstboot.service", "/etc/systemd/system/raw-node-firstboot.service", "0644") }}
@@ -41,4 +45,8 @@ autoinstall:
 {{ write_text(raw_node_conf, "/etc/raw-node/raw-node.conf", "0644") }}
     # 24.04: string form, single quotes keep the shell from expanding the hash.
     - curtin in-target --target=/target -- usermod --password '{{ root_password_hash }}' root
-    - curtin in-target --target=/target -- systemctl enable nftables.service raw-node-firstboot.service
+    # Foomuuri is the only firewall manager. nftables.service is masked because
+    # its stop action flushes the whole ruleset.
+    - curtin in-target --target=/target -- systemctl mask nftables.service ufw.service
+    # Foomuuri 0.22 on 24.04 has no foomuuri-boot.service.
+    - curtin in-target --target=/target -- systemctl enable foomuuri.service raw-node-firstboot.service

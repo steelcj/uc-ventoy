@@ -1,7 +1,7 @@
 ---
 title: "Ventoy Automated Configuration for Ubuntu 26.04 Server"
 version: "0.3.0"
-date: 2026-11-14
+date: 2026-11-15
 author: "Christopher Steel"
 status: "Draft, reviewed against current documentation, not yet tested in virtual machines"
 description: "Ubuntu Server 26.04 LTS autoinstall answer file that Ventoy delivers to Subiquity to produce the raw node defined in raw-node-baseline.md."
@@ -51,7 +51,7 @@ Some renderers, including GitHub, disable clicks inside Mermaid charts. The same
 
 Template: [`ubuntu/26.04/user-data.j2`](../../ubuntu/26.04/user-data.j2). `bin/build` renders it into `build/answer-files/ubuntu/26.04/user-data`, filling in the [inputs](raw-node-baseline.md#inputs) and embedding the [canonical files](raw-node-baseline.md#canonical-files).
 
-The `autoinstall` section sets locale, keyboard and time zone, keeps storage interactive, creates the initial user through `identity`, installs the OpenSSH server with the key and password authentication through `ssh`, and adds `nftables` and `python3`. Its `late-commands` write each canonical file with a quoted heredoc, set the root password and enable `nftables.service` and `raw-node-firstboot.service`.
+The `autoinstall` section sets locale, keyboard and time zone, keeps storage interactive, creates the initial user through `identity`, installs the OpenSSH server with the key and password authentication through `ssh`, and adds `nftables`, `python3` and `foomuuri`. Its `late-commands` write each canonical file with a quoted heredoc, set the root password, mask `nftables.service` and `ufw.service`, and enable `foomuuri.service` and `raw-node-firstboot.service`.
 
 ## Notes on the autoinstall file
 
@@ -70,7 +70,11 @@ The installer writes `/etc/ssh/sshd_config.d/50-cloud-init.conf` with its own `P
 
 The answer file also writes `/etc/cloud/cloud.cfg.d/99-raw-node.cfg` with `preserve_hostname: true`, so that cloud-init does not reset the suffixed hostname that `raw-node-firstboot` sets.
 
-Since Ubuntu 22.10, OpenSSH starts through `ssh.socket` rather than a permanently running `ssh.service` <a id="cite-ubuntu-ssh-socket"></a>([Ubuntu Community Hub, n.d.](#ref-ubuntu-ssh-socket)). The file therefore does not enable `ssh.service`. `ufw` is installed on Ubuntu Server but inactive. Leave it inactive so that `nftables` is the only firewall manager, as RN-08 requires.
+Since Ubuntu 22.10, OpenSSH starts through `ssh.socket` rather than a permanently running `ssh.service` <a id="cite-ubuntu-ssh-socket"></a>([Ubuntu Community Hub, n.d.](#ref-ubuntu-ssh-socket)). The file therefore does not enable `ssh.service`. With socket activation the port belongs to `ssh.socket`, not to sshd. `sshd-socket-generator`, which the `openssh-server` package installs, reads the effective sshd configuration at every boot and writes the socket's listen addresses from it. Run against a `Port` line in `sshd_config.d`, the packaged generator produced a socket for that port, so `20-raw-node-port.conf` is enough and no socket override is written. For port 22 the generator writes nothing and the socket's own default applies.
+
+The firewall is Foomuuri 0.31 from the `universe` component, so the installer needs network access to the archive. `foomuuri.service` loads the rules before `network-pre.target` and starts `foomuuri-boot.service` by itself, which loads the last good ruleset earlier still from the second boot on. `foomuuri-boot.service` has no install section, so it is not enabled separately. `ufw` is installed on Ubuntu Server with its service enabled, although it loads no rules. `late-commands` mask `ufw.service` and `nftables.service`, so that Foomuuri is the only firewall manager, as RN-08 requires, and nothing can flush its table.
+
+The answer file also writes `/etc/systemd/system/foomuuri.service.d/10-raw-node.conf`, which turns off the default dependencies of `foomuuri.service`. On 26.04 cloud-init no longer orders itself after the network, and a check of the packaged unit files finds no ordering cycle even without the drop-in. cloud-init can still wait for the network itself while `sysinit.target` is held back, which would block a Foomuuri that waits for `sysinit.target`, so the drop-in is written here too. See [contracts.md](contracts.md#notes-on-the-firewall-clauses).
 
 `python3` is part of Ubuntu Server already. It is listed in `packages` so that RN-09 is explicit in the answer file.
 
@@ -83,9 +87,9 @@ Since Ubuntu 22.10, OpenSSH starts through `ssh.socket` rather than a permanentl
 | RN-03 | `usermod --password` in `late-commands`; root SSH login refused by the drop-in |
 | RN-04 | `identity.username` and `identity.password`; default groups include `sudo` |
 | RN-05 | `ssh.authorized-keys` |
-| RN-06 | `ssh.install-server`; listening through `ssh.socket` |
-| RN-07 | Heredoc writes `/etc/ssh/sshd_config.d/10-local-auth.conf`, which sorts before `50-cloud-init.conf` |
-| RN-08 | `nftables` in `packages`; heredoc writes `/etc/nftables.conf`; `systemctl enable nftables.service`; `ufw` stays inactive |
+| RN-06 | `ssh.install-server`; listening through `ssh.socket`, on the port `sshd-socket-generator` reads from `20-raw-node-port.conf` |
+| RN-07 | Heredocs write `/etc/ssh/sshd_config.d/10-local-auth.conf`, which sorts before `50-cloud-init.conf`, and `20-raw-node-port.conf` |
+| RN-08 | `foomuuri` in `packages`; heredocs write `/etc/foomuuri/00-raw-node.conf` and the `foomuuri.service` drop-in; `systemctl mask nftables.service ufw.service`; `systemctl enable foomuuri.service` |
 | RN-09 | `python3` in `packages` |
 | RN-10 | `interactive-sections: [storage]` |
 | RN-11 | Only crypt hashes and the public key appear in the file |
@@ -97,12 +101,17 @@ Run the baseline [acceptance checks](raw-node-baseline.md#acceptance-checks), th
 
 ```sh
 systemctl status ssh.socket
-sudo ufw status
+systemctl cat ssh.socket
+systemctl is-enabled ufw nftables
+systemctl status foomuuri
+systemctl cat foomuuri
+cloud-init status --long
+journalctl -b | grep -i -E 'ordering cycle|deleted to break'
 ls /etc/ssh/sshd_config.d/
 hostnamectl --static
 ```
 
-`ssh.socket` should be active and enabled. `ssh.service` may show as inactive until the first connection arrives, which is expected with socket activation. `ufw status` should report `inactive`. `10-local-auth.conf` should be listed before `50-cloud-init.conf`. The hostname should be `ub2604-vt-` followed by four hexadecimal digits, and should survive a reboot.
+`ssh.socket` should be active and enabled. `ssh.service` may show as inactive until the first connection arrives, which is expected with socket activation. When `ssh_port` is not 22, `systemctl cat ssh.socket` should show a generated drop-in with that port. `ufw` and `nftables` should both be `masked`. `foomuuri.service` should be active, and `systemctl cat foomuuri` should show the `10-raw-node.conf` drop-in. `cloud-init status` should report `done` without errors, and the journal search should print nothing. `10-local-auth.conf` should be listed before `20-raw-node-port.conf` and `50-cloud-init.conf`. The hostname should be `ub2604-vt-` followed by four hexadecimal digits, and should survive a reboot.
 
 ## Review history
 
@@ -117,12 +126,21 @@ hostnamectl --static
 | `python3` | Added in 0.2.0 | Requested explicitly for RN-09. |
 | Hostname | Changed in 0.3.0 | `ub2604-vt` plus a MAC suffix at first boot, replacing `ubuntu-server`. |
 | First-boot report and `preserve_hostname` | Added in 0.3.0 | RN-12. |
+| Firewall | Replaced in 0.3.0 | Foomuuri with `/etc/foomuuri/00-raw-node.conf` instead of `/etc/nftables.conf`. `nftables.service` and `ufw.service` masked. Drop-in for `foomuuri.service`. |
+| SSH port | Added in 0.3.0 | `20-raw-node-port.conf`, from the `ssh_port` input. |
 
 ## Qualification
 
 This is a reviewed configuration template, not yet a tested turnkey installer. Validate it in an Incus virtual machine before using it on physical hardware.
 
 ## Change log
+
+### 0.3.0, 2026-11-15
+
+- Firewall changed to Foomuuri 0.31: `foomuuri` added to the packages, `/etc/foomuuri/00-raw-node.conf` written instead of `/etc/nftables.conf`, `nftables.service` and `ufw.service` masked, `foomuuri.service` enabled.
+- A drop-in for `foomuuri.service` keeps it out of an ordering cycle with cloud-init.
+- SSH port drop-in written from the `ssh_port` input, followed by `ssh.socket` through `sshd-socket-generator`.
+- The confirmation follows the raw node contract 0.1.0. See [contracts.md](contracts.md).
 
 ### 0.3.0, 2026-11-14
 
