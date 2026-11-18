@@ -52,8 +52,8 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 # The uc-ventoy baseline, and the raw node contract version it implements.
 # Both are recorded on every node in /etc/raw-node/raw-node.conf.
-BASELINE_VERSION = "0.3.0"
-CONTRACT_VERSION = "0.1.0"
+BASELINE_VERSION = "0.4.0"
+CONTRACT_VERSION = "0.3.0"
 
 # Template file name -> (installer kind, answer file name on the stick)
 TEMPLATES = {
@@ -65,8 +65,10 @@ DISTRO_PREFIX = {"debian": "deb", "ubuntu": "ub", "fedora": "fed", "rocky": "roc
 NOT_TARGETS = {"shared", "bin", "build", "docs", "confirmations"}
 
 REQUIRED_KEYS = ["root_password_hash", "initial_username", "initial_password_hash", "ssh_public_key"]
-# Optional keys and their defaults. Both shape the raw node firewall and sshd.
-OPTIONAL_KEYS = {"ssh_port": 22, "ssh_sources": []}
+# Optional keys and their defaults. ssh_port and ssh_sources shape the raw node
+# firewall and sshd. password_batch names the controller batch that
+# initial_password_hash came from, and is recorded on the node only.
+OPTIONAL_KEYS = {"ssh_port": 22, "ssh_sources": [], "password_batch": None}
 FOOMUURI_TEMPLATE = "shared/foomuuri/00-raw-node.conf.j2"
 FOOMUURI_DEST = "/etc/foomuuri/00-raw-node.conf"
 SSH_PORT_DEST = "/etc/ssh/sshd_config.d/20-raw-node-port.conf"
@@ -78,11 +80,16 @@ REQUIRED_DESTS = [
 ]
 RETIRED_DESTS = ["/etc/nftables.conf"]
 # The confirmation fields of the raw node contract, in the order it shows them.
-REPORT_FIELDS = ["contract", "baseline", "timestamp", "machine_id", "user", "sudo", "ssh_port",
-                 "firewall", "firewall_active", "python", "interfaces"]
+REPORT_FIELDS = ["contract", "baseline", "timestamp", "machine_id", "user", "sudo", "sudo_nopasswd",
+                 "ssh_port", "ssh_password_auth", "ssh_host_keys", "firewall", "firewall_active",
+                 "python", "interfaces"]
+HOST_KEY_FIELDS = ["type", "fingerprint"]
 INTERFACE_FIELDS = ["name", "type", "mac", "state", "default_route4", "default_route6", "ip", "ip6"]
 HASH_RE = re.compile(r"^\$[0-9a-z]+\$\S+$")
 USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+# Written into raw-node.conf, which the node's scripts read with the shell,
+# so only characters that need no quoting there.
+BATCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 KEY_RE = re.compile(
     r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|"
     r"sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+=*( \S.*)?$"
@@ -170,6 +177,14 @@ def load_optional(data, values, path, p):
         if network not in clean:
             clean.append(network)
     values["ssh_sources"] = clean
+
+    batch = data.get("password_batch")
+    if batch is not None and (not isinstance(batch, str) or not BATCH_RE.match(batch)):
+        p.error(f"{path.name}: password_batch must be a batch ID of letters, digits, dots, hyphens "
+                f"and underscores, at most 64 characters, such as raw-2026-11-17-manual "
+                f"(quote it if YAML reads it as a number)")
+        batch = None
+    values["password_batch"] = batch
 
 
 def check_embeddable(rel, text, p):
@@ -304,6 +319,10 @@ def render(target, values, foomuuri_conf, p):
         f"RAW_NODE_BASELINE={BASELINE_VERSION}\n"
         f"RAW_NODE_CONTRACT={CONTRACT_VERSION}\n"
     )
+    if values["password_batch"]:
+        # Not a contract field: lets an operator at the console see which
+        # controller batch password the node was built with.
+        raw_node_conf += f"RAW_NODE_PASSWORD_BATCH={values['password_batch']}\n"
     # Written even for port 22, so the port a node listens on is never implied.
     ssh_port_conf = (
         "# Written by the raw node answer file. Must match the firewall.\n"
@@ -398,56 +417,66 @@ def selftest_autoinstall(text, files, label, p):
             compare_written(tmp, files, label, p)
 
 
-def selftest_report(p):
-    """Run raw-node-report on this workstation and check what it prints.
+def run_report(conf, etc, sysfs=None):
+    env = {**os.environ, "RAW_NODE_CONF": str(conf), "RAW_NODE_ETC": str(etc)}
+    if sysfs:
+        env["RAW_NODE_SYSFS"] = str(sysfs)
+    return subprocess.run(["sh", str(ROOT / "shared/bin/raw-node-report")],
+                          capture_output=True, text=True, env=env)
 
-    The report only reads, so it is safe to run here. The check is that the
-    output is valid YAML with the confirmation fields of the raw node
-    contract, in the contract's order and with the contract's types. The
-    values describe the workstation and are not judged.
-    """
-    rel = "shared/bin/raw-node-report"
-    if not shutil.which("ip"):
-        p.warn(f"{rel}: ip not found, report output not checked")
-        return None
-    with tempfile.TemporaryDirectory() as tmp:
-        conf = Path(tmp) / "raw-node.conf"
-        conf.write_text(f"RAW_NODE_USER=initial\nRAW_NODE_BASELINE={BASELINE_VERSION}\n"
-                        f"RAW_NODE_CONTRACT={CONTRACT_VERSION}\n")
-        r = subprocess.run(["sh", str(ROOT / rel)], capture_output=True, text=True,
-                           env={**os.environ, "RAW_NODE_CONF": str(conf)})
+
+def parse_report(r, rel, case, p):
+    """Return the report mapping from a run, or None after recording why not."""
     if r.returncode not in (0, 1) or r.stderr.strip():
-        p.error(f"{rel}: self-test run failed with status {r.returncode}: {r.stderr.strip()}")
+        p.error(f"{rel}: {case}: run failed with status {r.returncode}: {r.stderr.strip()}")
         return None
     try:
         data = yaml.safe_load(r.stdout)
     except yaml.YAMLError as exc:
-        p.error(f"{rel}: output is not valid YAML: {exc}")
+        p.error(f"{rel}: {case}: output is not valid YAML: {exc}")
         return None
     if not isinstance(data, dict) or len(data) != 1:
-        p.error(f"{rel}: output must be one mapping keyed by the hostname")
+        p.error(f"{rel}: {case}: output must be one mapping keyed by the hostname")
         return None
     report = next(iter(data.values()))
     if not isinstance(report, dict) or list(report) != REPORT_FIELDS:
-        p.error(f"{rel}: fields are {list(report) if isinstance(report, dict) else report!r}, "
+        p.error(f"{rel}: {case}: fields are {list(report) if isinstance(report, dict) else report!r}, "
                 f"expected {REPORT_FIELDS}")
         return None
+    return report
+
+
+def check_report_types(report, rel, p):
     if report["contract"] != CONTRACT_VERSION or report["baseline"] != BASELINE_VERSION:
         p.error(f"{rel}: contract and baseline were not read from raw-node.conf")
-    for key in ("sudo", "firewall_active"):
+    for key in ("sudo", "sudo_nopasswd", "ssh_password_auth", "firewall_active"):
         if not isinstance(report[key], bool):
             p.error(f"{rel}: {key} must be true or false, got {report[key]!r}")
     if report["ssh_port"] is not None and not isinstance(report["ssh_port"], int):
         p.error(f"{rel}: ssh_port must be a number or empty, got {report['ssh_port']!r}")
+    if not isinstance(report["machine_id"], str):
+        p.error(f"{rel}: machine_id must be a string, got {report['machine_id']!r}")
+    keys = report["ssh_host_keys"]
+    if not isinstance(keys, list) or not keys:
+        p.error(f"{rel}: ssh_host_keys must be a list with at least one key, got {keys!r}")
+    else:
+        for key in keys:
+            if not isinstance(key, dict) or list(key) != HOST_KEY_FIELDS:
+                p.error(f"{rel}: host key {key!r} does not have the fields {HOST_KEY_FIELDS}")
+            elif not all(isinstance(v, str) for v in key.values()) \
+                    or not key["fingerprint"].startswith("SHA256:"):
+                p.error(f"{rel}: host key {key!r} is not a key type and a SHA256 fingerprint")
     interfaces = report["interfaces"]
     if not isinstance(interfaces, list):
         p.error(f"{rel}: interfaces must be a list")
-        return None
+        return
     for iface in interfaces:
         name = iface.get("name") if isinstance(iface, dict) else iface
         if not isinstance(iface, dict) or list(iface) != INTERFACE_FIELDS:
             p.error(f"{rel}: interface {name!r} does not have the fields {INTERFACE_FIELDS}")
             continue
+        if not isinstance(iface["mac"], str):
+            p.error(f"{rel}: interface {name}: mac must be a string, got {iface['mac']!r}")
         if iface["type"] not in ("ethernet", "wireless", "other"):
             p.error(f"{rel}: interface {name}: type is {iface['type']!r}")
         if iface["state"] not in ("up", "down"):
@@ -458,7 +487,89 @@ def selftest_report(p):
         for key in ("ip", "ip6"):
             if not isinstance(iface[key], list):
                 p.error(f"{rel}: interface {name}: {key} must be a list")
-    return len(interfaces)
+
+
+def selftest_report(p):
+    """Run raw-node-report on this workstation and check what it prints.
+
+    The report only reads, so it is safe to run here. The sudoers files, the
+    SSH host keys and the machine ID come from a test folder (RAW_NODE_ETC),
+    because the real sudoers files need root. The network interfaces and the
+    SSH server configuration are the workstation's own.
+
+    Checked: the output is valid YAML with the confirmation fields of the raw
+    node contract, in the contract's order and with the contract's types; a
+    MAC address and a machine ID of digits only stay strings; sudo_nopasswd
+    follows NOPASSWD and !authenticate rules and ignores comments; the host
+    key fingerprints are those ssh-keygen prints; and a node without a host
+    key gets no report at all. The workstation's own values are not judged.
+    """
+    rel = "shared/bin/raw-node-report"
+    for tool in ("ip", "ssh-keygen"):
+        if not shutil.which(tool):
+            p.warn(f"{rel}: {tool} not found, report output not checked")
+            return None
+    if not (shutil.which("sshd") or Path("/usr/sbin/sshd").exists()):
+        p.warn(f"{rel}: sshd not found, report output not checked (sudo apt install openssh-server)")
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        conf = tmp / "raw-node.conf"
+        conf.write_text(f"RAW_NODE_USER=initial\nRAW_NODE_BASELINE={BASELINE_VERSION}\n"
+                        f"RAW_NODE_CONTRACT={CONTRACT_VERSION}\n")
+        etc = tmp / "etc"
+        (etc / "ssh").mkdir(parents=True)
+        (etc / "sudoers.d").mkdir()
+        machine_id = "12345678901234567890123456789012"
+        (etc / "machine-id").write_text(machine_id + "\n")
+        (etc / "sudoers").write_text("%sudo\tALL=(ALL:ALL) ALL\n# %wheel ALL=(ALL) NOPASSWD: ALL\n"
+                                     "@includedir /etc/sudoers.d\n")
+        key = etc / "ssh" / "ssh_host_ed25519_key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", str(key)], check=True)
+        fingerprint = subprocess.run(["ssh-keygen", "-l", "-E", "sha256", "-f", f"{key}.pub"],
+                                     capture_output=True, text=True, check=True).stdout.split()[1]
+
+        report = parse_report(run_report(conf, etc), rel, "workstation", p)
+        if report is None:
+            return None
+        check_report_types(report, rel, p)
+        if report["machine_id"] != machine_id:
+            p.error(f"{rel}: machine_id {report['machine_id']!r} is not the quoted {machine_id}")
+        if report["sudo_nopasswd"] is not False:
+            p.error(f"{rel}: sudo_nopasswd is {report['sudo_nopasswd']!r} with no NOPASSWD rule "
+                    f"(a commented one must not count)")
+        if report["ssh_host_keys"] != [{"type": "ssh-ed25519", "fingerprint": fingerprint}]:
+            p.error(f"{rel}: ssh_host_keys is {report['ssh_host_keys']!r}, "
+                    f"expected the test key with {fingerprint}")
+
+        for name, rule in (("10-nopasswd", "initial ALL=(ALL) NOPASSWD: ALL\n"),
+                           ("10-noauth", "Defaults:initial !authenticate\n")):
+            rule_file = etc / "sudoers.d" / name
+            rule_file.write_text(rule)
+            found = parse_report(run_report(conf, etc), rel, f"sudoers.d/{name}", p)
+            if found is not None and found["sudo_nopasswd"] is not True:
+                p.error(f"{rel}: sudo_nopasswd is {found['sudo_nopasswd']!r} with the rule {rule.strip()!r}")
+            rule_file.unlink()
+
+        # A MAC address of decimal digits only, as QEMU gives out.
+        net = tmp / "sys" / "class" / "net" / "ens9"
+        net.mkdir(parents=True)
+        for name, value in (("address", "52:54:00:12:34:56"), ("operstate", "down"),
+                            ("carrier", "0"), ("type", "1"), ("uevent", "INTERFACE=ens9")):
+            (net / name).write_text(value + "\n")
+        found = parse_report(run_report(conf, etc, tmp / "sys"), rel, "digit MAC", p)
+        if found is not None:
+            macs = [i.get("mac") for i in found["interfaces"] if isinstance(i, dict)]
+            if macs != ["52:54:00:12:34:56"]:
+                p.error(f"{rel}: the MAC 52:54:00:12:34:56 was read back as {macs!r}")
+
+        for path in (etc / "ssh").iterdir():
+            path.unlink()
+        r = run_report(conf, etc)
+        if r.returncode != 2 or r.stdout or "host key" not in r.stderr:
+            p.error(f"{rel}: without a host key the report must print nothing and exit 2, "
+                    f"got status {r.returncode}, output {r.stdout[:80]!r}, errors {r.stderr.strip()!r}")
+    return len(report["interfaces"]) if isinstance(report["interfaces"], list) else None
 
 
 def check_tools(p):

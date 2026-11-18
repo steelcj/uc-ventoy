@@ -1,6 +1,6 @@
 # ventoy-raw-node
 
-Generator for Ventoy answer files that build a raw node: the minimal, identical starting state of every server before Ansible takes over. See [en/docs/raw-node-baseline.md](en/docs/raw-node-baseline.md) for the definition, and [en/docs/contracts.md](en/docs/contracts.md) for the raw node contract that every node fulfils.
+Generator for Ventoy answer files that build a raw node: the minimal, identical starting state of every server before Ansible takes over. See [en/docs/raw-node-baseline.md](en/docs/raw-node-baseline.md) for the definition, and [en/docs/contracts.md](en/docs/contracts.md) for how every node fulfils the raw node contract, version 0.3.0. The contract itself lives in uc-contracts: [`uc-raw-node-contract.md`](https://github.com/steelcj/uc-contracts/blob/main/en/docs/node-onboarding-pipeline/1-raw-node-egress/uc-raw-node-contract.md).
 
 Run it on your workstation. Only its output goes on the Ventoy stick.
 
@@ -190,7 +190,7 @@ See [Installing shellcheck](https://github.com/koalaman/shellcheck#installing)
 
 ### raw-node-input.yml
 
-Before building your Ventoy automated installer you need to prepare the four variables that the build process requires for the out of box compatibility of the builder. Two more are optional: `ssh_port` (default 22) and `ssh_sources` (default empty, meaning SSH is reachable from anywhere). `raw-node-input.example.yml` explains both.
+Before building your Ventoy automated installer you need to prepare the four variables that the build process requires for the out of box compatibility of the builder. Three more are optional: `ssh_port` (default 22), `ssh_sources` (default empty, meaning SSH is reachable from anywhere) and `password_batch` (the batch ID of the initial password). `raw-node-input.example.yml` explains them.
 
 I edit  `raw-node-input.yml`directly and once everything is working as it should I copy it to `raw-node-input.example.yml` just in case it gets clobbered by some other developer or automation tool.
 
@@ -210,13 +210,19 @@ and then I generate my password hashed and copy paste into the open file, follow
 
 ### Creating  your users password hashes
 
-By default the version of the Ventoy auto installer supports a root password and an initial users password.
+The Ventoy auto installer sets a root password and an initial user's password. The two hashes come from different places.
 
-Create your hashes with this command and copy paste into your `raw-node-input.yml`file:
+**`root_password_hash`** is yours. Create it with this command and copy paste it into your `raw-node-input.yml` file:
 
 ```bash
 mkpasswd --method=sha-512
 ```
+
+**`initial_password_hash`** comes from the Ansible controller, which holds the initial password for the whole build batch (raw node contract 0.3.0). In uc-controller, `scripts/new_raw_batch.py` makes the password, keeps it, and prints a batch ID and a SHA-512 hash. Copy the hash into `initial_password_hash` and the batch ID into `password_batch`. uc-ventoy never sees the password itself.
+
+`new_raw_batch.py` is not built yet. Until it is, make a batch by hand as described in [contracts.md](en/docs/contracts.md#the-initial-password): a password of at least 15 characters (the command there makes 24), kept in your password manager under a batch ID such as `raw-2026-11-17-manual`, and hashed with `mkpasswd --method=sha-512`.
+
+The initial password works at the console and for `sudo`, not over SSH, which accepts your key only.
 
 ### Grab the contents of the public key you are using
 
@@ -246,7 +252,7 @@ Output example:
 warning: foomuuri not found, raw node firewall not checked (sudo apt install foomuuri)
 Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
 warning: shellcheck not found, shared scripts not linted (sudo apt install shellcheck)
-Report: raw-node-report prints valid YAML with the contract 0.1.0 fields (3 interfaces on this workstation), self-test OK
+Report: raw-node-report prints valid YAML with the contract 0.3.0 fields (3 interfaces on this workstation), self-test OK
 Targets:
   debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
   ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 9 files embedded, self-test OK
@@ -300,7 +306,7 @@ Complex output example:
 ```bash
 warning: foomuuri check needs root for its nftables check; check the raw node firewall once with: sudo bin/build --check-firewall-only
 Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
-Report: raw-node-report prints valid YAML with the contract 0.1.0 fields (3 interfaces on this workstation), self-test OK
+Report: raw-node-report prints valid YAML with the contract 0.3.0 fields (3 interfaces on this workstation), self-test OK
 Targets:
   debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
   ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 9 files embedded, self-test OK
@@ -359,7 +365,7 @@ Output example:
 warning: foomuuri not found, raw node firewall not checked (sudo apt install foomuuri)
 Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
 warning: shellcheck not found, shared scripts not linted (sudo apt install shellcheck)
-Report: raw-node-report prints valid YAML with the contract 0.1.0 fields (3 interfaces on this workstation), self-test OK
+Report: raw-node-report prints valid YAML with the contract 0.3.0 fields (3 interfaces on this workstation), self-test OK
 Targets:
   debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
   ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 9 files embedded, self-test OK
@@ -414,7 +420,7 @@ On my test system
 
 ## Layout
 
-- `raw-node-input.yml`: your four values and the two optional SSH values (git-ignored).
+- `raw-node-input.yml`: your four values, the two optional SSH values and the optional password batch ID (git-ignored).
 - `shared/`: files written identically on every node: SSH policy, the Foomuuri firewall template, `raw-node-report`, `raw-node-firstboot` and its systemd unit, and a cloud-init setting and a systemd drop-in used on Ubuntu.
 - `<distro>/<version>/*.j2`: one answer file template per target. A new folder is a new target.
 - `bin/build`: renders every target, embeds the shared files, re-extracts them to prove they arrive byte for byte, and writes `build/`.
@@ -429,6 +435,8 @@ ISOs stay where they are, under `/iso/<distro>/<version>/`. Ventoy matches each 
 ## On the node
 
 At first boot, `raw-node-firstboot.service` appends the MAC suffix to the hostname (`deb13-vt` becomes `deb13-vt-a1b2`), writes `/var/lib/raw-node/confirmation.yml` in the format of the raw node contract, and shows it at the console login prompt. `sudo raw-node-report` prints it again at any time.
+
+SSH accepts the key only. The initial user's batch password works at the console, which is the recovery path while the node is raw, and `sudo` asks for it.
 
 ## History
 

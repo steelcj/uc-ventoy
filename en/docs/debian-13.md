@@ -1,7 +1,7 @@
 ---
 title: "Ventoy Automated Configuration for Debian 13 Server"
-version: "0.3.0"
-date: 2026-11-15
+version: "0.4.0"
+date: 2026-11-17
 author: "Christopher Steel"
 status: "Draft, reviewed against current documentation, not yet tested in virtual machines"
 description: "Debian 13 preseed answer file that Ventoy delivers to the Debian Installer to produce the raw node defined in raw-node-baseline.md."
@@ -61,8 +61,9 @@ Each canonical file is written with `printf`, one single-quoted argument per lin
     printf '%s\n' \
         'PermitRootLogin no' \
         'PubkeyAuthentication yes' \
-        'PasswordAuthentication yes' \
+        'PasswordAuthentication no' \
         'KbdInteractiveAuthentication no' \
+        'PermitEmptyPasswords no' \
         'UsePAM yes' \
         > /target/etc/ssh/sshd_config.d/10-local-auth.conf; \
     chmod 0644 /target/etc/ssh/sshd_config.d/10-local-auth.conf; \
@@ -78,7 +79,9 @@ The firewall is Foomuuri 0.27 from Debian's main archive, which pulls in `nftabl
 
 `ssh.service` is already enabled by the `openssh-server` package. It reads `Port` from `/etc/ssh/sshd_config.d/20-raw-node-port.conf`.
 
-The rendered `late_command` is about 19 kB once the installer has joined its lines, roughly twice the size that passed on metal with baseline 0.2.0, mostly because of the longer report script. The installer's parser has no fixed limit in its source, but the first installation with this baseline should confirm it.
+The rendered `late_command` is about 25 kB once the installer has joined its lines, mostly because of the report script, which grew with the contract 0.3.0 fields. Baseline 0.2.0 passed on metal at about 10 kB, and the operator reported a successful install with baseline 0.3.0 at about 19 kB on 2026-11-17. The installer's parser has no fixed limit in its source, and the command runs as one `sh -c` argument, which Linux limits to 128 kB. The first installation with this baseline should still confirm it.
+
+The SSH policy drop-in turns password and keyboard-interactive login off, so the initial user logs in over SSH with the key only (contract RN-SSH-03). Debian's `sshd_config` includes `sshd_config.d/*.conf` before any setting of its own, and the `sshd -G` of `openssh-server` 1:10.0p1-7+deb13u4 reports `passwordauthentication no` with the raw node drop-ins. The password from `passwd/user-password-crypted` still works at the console and for sudo, which asks for it: the stock `/etc/sudoers` has no `NOPASSWD` or `!authenticate`, and `late_command` writes no sudoers file. The SSH host keys are made when `openssh-server` is installed, so they exist before the first boot and the report can list them.
 
 `netcfg/get_hostname` is only a fallback when DHCP does not supply a name, so `netcfg/hostname` forces `deb13-vt` regardless of DHCP. The domain is `home.arpa` because `.local` is reserved for Multicast DNS <a id="cite-rfc6762"></a>([Cheshire & Krochmal, 2013](#ref-rfc6762)), and `home.arpa` is the name set aside for residential and small networks <a id="cite-rfc8375"></a>([Pfister & Lemon, 2018](#ref-rfc8375)). At first boot, `raw-node-firstboot` replaces `deb13-vt` with the suffixed name in both `/etc/hostname` and `/etc/hosts`, including the `deb13-vt.home.arpa` entry.
 
@@ -93,10 +96,10 @@ Language and keyboard may still be asked before the preseed file is read, depend
 | RN-01 | `netcfg/hostname` set to `deb13-vt`; suffix added by `raw-node-firstboot` |
 | RN-02 | `debian-installer/locale`, `keyboard-configuration/xkb-keymap`, `time/zone`, `clock-setup/ntp` |
 | RN-03 | `passwd/root-login` and `passwd/root-password-crypted`; root SSH login refused by the drop-in |
-| RN-04 | `passwd/username` and `passwd/user-password-crypted`; `usermod -aG sudo` in `late_command` |
+| RN-04 | `passwd/username` and `passwd/user-password-crypted`, the hash from the Ansible controller; `usermod -aG sudo` in `late_command`; no sudoers file written |
 | RN-05 | `install -d -m 0700`, `printf` and `chmod 0600` in `late_command` |
 | RN-06 | `tasksel` `ssh-server`; `ssh.service` enabled by the package; `Port` from `20-raw-node-port.conf` |
-| RN-07 | `printf` writes `/etc/ssh/sshd_config.d/10-local-auth.conf` and `20-raw-node-port.conf`; Debian includes `sshd_config.d/*.conf` at the top of `sshd_config` |
+| RN-07 | `printf` writes `/etc/ssh/sshd_config.d/10-local-auth.conf`, key-only, and `20-raw-node-port.conf`; Debian includes `sshd_config.d/*.conf` at the top of `sshd_config` |
 | RN-08 | `foomuuri` in `pkgsel/include`; `printf` writes `/etc/foomuuri/00-raw-node.conf`; `systemctl mask nftables.service`; `systemctl enable foomuuri.service` |
 | RN-09 | `python3` in `pkgsel/include` |
 | RN-10 | Partitioning not preseeded, so the partitioner stops for confirmation |
@@ -133,12 +136,19 @@ grep 127.0.1.1 /etc/hosts
 | First-boot report | Added in 0.3.0 | RN-12. |
 | Firewall | Replaced in 0.3.0 | Foomuuri with `/etc/foomuuri/00-raw-node.conf` instead of `/etc/nftables.conf`. `nftables.service` masked. |
 | SSH port | Added in 0.3.0 | `20-raw-node-port.conf`, from the `ssh_port` input. |
+| SSH password login | Removed in 0.4.0 | `PasswordAuthentication no` and `PermitEmptyPasswords no`, for contract RN-SSH-03. |
 
 ## Qualification
 
 This is a reviewed configuration template, not yet a tested turnkey installer. Validate it in an Incus virtual machine before using it on physical hardware.
 
 ## Change log
+
+### 0.4.0, 2026-11-17
+
+- Key-only SSH: `PasswordAuthentication no` and `PermitEmptyPasswords no` in the policy drop-in.
+- `passwd/user-password-crypted` takes the batch hash from the Ansible controller, and `raw-node.conf` records the batch ID when `password_batch` is set.
+- The confirmation follows the raw node contract 0.3.0. See [contracts.md](contracts.md).
 
 ### 0.3.0, 2026-11-15
 

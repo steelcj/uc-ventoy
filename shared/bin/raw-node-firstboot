@@ -8,7 +8,9 @@
 # 3. Shows the confirmation at the console login prompt.
 #
 # Started by raw-node-firstboot.service, which does not run again once
-# confirmation.yml exists. Delete that file to run it again.
+# confirmation.yml exists. Delete that file to run it again. When the report
+# cannot be measured, no confirmation.yml is written and the service fails,
+# so it runs again at the next boot.
 #
 # Written without single quotes or backslashes so that it can be embedded
 # in a Debian preseed late_command with printf, one argument per line.
@@ -87,17 +89,32 @@ case "$old" in
         ;;
 esac
 
-mkdir -p "$state_dir"
-/usr/local/sbin/raw-node-report "$user" > "$state_dir/confirmation.yml"
+mkdir -p "$state_dir" /etc/issue.d
+# Status 0 or 1: the report was measured, and confirmation.yml is written.
+# Status 2: it could not be measured, for example because there is no SSH
+# host key yet. No confirmation.yml is written, so the service runs again at
+# the next boot, and the console shows why.
+/usr/local/sbin/raw-node-report "$user" > "$state_dir/confirmation.yml.new" 2> "$state_dir/report.err"
 status=$?
-chmod 0644 "$state_dir/confirmation.yml"
-
-mkdir -p /etc/issue.d
-{
-    echo "Raw node confirmation:"
-    cat "$state_dir/confirmation.yml"
-    echo
-} > "$issue_file"
+cat "$state_dir/report.err" >&2
+if [ "$status" -le 1 ]; then
+    chmod 0644 "$state_dir/confirmation.yml.new"
+    mv "$state_dir/confirmation.yml.new" "$state_dir/confirmation.yml"
+    {
+        echo "Raw node confirmation:"
+        cat "$state_dir/confirmation.yml"
+        echo
+    } > "$issue_file"
+else
+    rm -f "$state_dir/confirmation.yml.new"
+    {
+        echo "Raw node confirmation could not be written:"
+        cat "$state_dir/report.err"
+        echo "raw-node-firstboot.service runs again at the next boot."
+        echo
+    } > "$issue_file"
+fi
+rm -f "$state_dir/report.err"
 agetty --reload >/dev/null 2>&1 || true
 
 exit "$status"

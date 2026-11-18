@@ -23,7 +23,9 @@ autoinstall:
 
   ssh:
     install-server: true
-    allow-pw: true
+    # Key-only SSH (RN-SSH-03). cloud-init then writes PasswordAuthentication no
+    # to 50-cloud-init.conf, which agrees with 10-local-auth.conf.
+    allow-pw: false
     authorized-keys:
       - "{{ ssh_public_key }}"
 

@@ -1,3 +1,11 @@
+---
+title: "Kickoff: make uc-ventoy fulfil raw node contract 0.3.0"
+date: 2026-11-16
+author: "Christopher Steel"
+status: "Kickoff"
+description: "Instructions for the session that brings the uc-ventoy targets to raw node contract 0.3.0 as baseline 0.4.0: key-only SSH, the controller-held initial password, no passwordless sudo, and the new confirmation fields."
+---
+
 # Kickoff: make uc-ventoy fulfil raw node contract 0.3.0
 
 ## Goal

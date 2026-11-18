@@ -8,9 +8,16 @@
 #
 # Usage: raw-node-report [username]
 # The user name defaults to RAW_NODE_USER in raw-node.conf, then to initial.
-# Run as root. Without root, sudo is judged from group membership and the
-# firewall table is not looked at.
-# Exit status: 0 if the user exists and can use sudo, 1 otherwise.
+# Run as root. Without root, sudo is judged from group membership, the
+# firewall table is not looked at, and the sudoers files cannot be read.
+#
+# Exit status:
+#   0  the report was printed, and the user exists and can use sudo
+#   1  the report was printed, and the user is missing or cannot use sudo
+#   2  the report could not be measured: a sudoers file could not be read,
+#      the SSH server configuration could not be read, or there is no SSH
+#      host key. Nothing is printed on standard output, and the reasons go
+#      to standard error.
 #
 # Written without single quotes or backslashes so that it can be embedded
 # in a Debian preseed late_command with printf, one argument per line.
@@ -22,6 +29,9 @@ export LC_ALL
 
 conf="${RAW_NODE_CONF:-/etc/raw-node/raw-node.conf}"
 sysfs="${RAW_NODE_SYSFS:-/sys}"
+# The sudoers files, the SSH host keys and the machine ID are read from here.
+# Changed only by the self-test in bin/build.
+etc="${RAW_NODE_ETC:-/etc}"
 
 RAW_NODE_USER=initial
 RAW_NODE_CONTRACT=""
@@ -32,6 +42,22 @@ if [ -r "$conf" ]; then
     . "$conf"
 fi
 user="${1:-$RAW_NODE_USER}"
+
+# A double quote, for quoting YAML strings. A here document is the only way
+# to write one without a backslash or a single quote.
+dq="$(cat <<END
+"
+END
+)"
+nl="
+"
+
+# Set when a value cannot be measured. The report is then not printed.
+failed=false
+fail() {
+    echo "raw-node-report: $1" >&2
+    failed=true
+}
 
 # Print the word that follows a keyword, for example the address after
 # permaddr in a line of ip output. Prints nothing when the keyword is absent.
@@ -45,6 +71,14 @@ word_after() {
         fi
         shift
     done
+    return 0
+}
+
+# Print the second word of its arguments.
+second_word() {
+    if [ "$#" -ge 2 ]; then
+        echo "$2"
+    fi
     return 0
 }
 
@@ -67,11 +101,14 @@ flow_list() {
     echo "[$list]"
 }
 
-# Print the port in the configuration that sshd itself reads. sshd -G prints
-# the effective configuration without host keys or the privilege separation
-# directory, which Ubuntu only creates when the first connection starts sshd.
-# sshd -T is the fallback for OpenSSH older than 9.2.
-sshd_port() {
+# Find how to print the configuration that sshd itself reads, and set
+# sshd_dump to that option. sshd -G prints the effective configuration
+# without loading host keys or needing the privilege separation directory,
+# which Ubuntu only creates when the first connection starts sshd. It prints
+# the same settings as sshd -T, which is the fallback for older OpenSSH.
+sshd=""
+sshd_dump=""
+find_sshd_dump() {
     sshd="$(command -v sshd 2>/dev/null)"
     if [ -z "$sshd" ]; then
         sshd=/usr/sbin/sshd
@@ -79,16 +116,86 @@ sshd_port() {
     if [ ! -x "$sshd" ]; then
         return 0
     fi
+    for option in -G -T; do
+        if "$sshd" "$option" 2>/dev/null | grep -q "^passwordauthentication "; then
+            sshd_dump="$option"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# Print the first value of a setting in the sshd configuration, such as
+# port or passwordauthentication. Prints nothing when it cannot be read.
+sshd_value() {
+    if [ -z "$sshd_dump" ]; then
+        return 0
+    fi
     # Word splitting of the sshd output is intended.
     # shellcheck disable=SC2046
-    set -- $("$sshd" -G 2>/dev/null | grep "^port ")
-    if [ "$#" -lt 2 ]; then
+    second_word $("$sshd" "$sshd_dump" 2>/dev/null | grep "^$1 ")
+}
+
+# Set sudo_nopasswd to true when a sudoers rule contains NOPASSWD or
+# !authenticate. Every file is read: /etc/sudoers, /etc/sudoers-rs, which
+# sudo-rs reads instead of /etc/sudoers when it exists, and every file in
+# /etc/sudoers.d, including those sudo skips. Comment lines are not rules
+# and are left out.
+sudo_nopasswd=false
+check_sudoers() {
+    set +f
+    set -- "$etc/sudoers" "$etc/sudoers-rs" "$etc"/sudoers.d/*
+    set -f
+    for file in "$@"; do
+        if [ ! -f "$file" ]; then
+            continue
+        fi
+        if [ ! -r "$file" ]; then
+            fail "cannot read $file, so sudo_nopasswd cannot be measured; run as root"
+            continue
+        fi
+        if grep -v "^[[:space:]]*#" "$file" | grep -q -E "NOPASSWD|![[:space:]]*authenticate"; then
+            sudo_nopasswd=true
+        fi
+    done
+    return 0
+}
+
+# Set host_keys to the YAML list of SSH host keys, one entry per
+# ssh_host_*_key.pub, with the key type from the file and the SHA256
+# fingerprint from ssh-keygen. No key, or a key that cannot be read, fails
+# the report, so the list is never empty.
+host_keys=""
+list_host_keys() {
+    set +f
+    set -- "$etc"/ssh/ssh_host_*_key.pub
+    set -f
+    if [ ! -f "$1" ]; then
+        fail "no SSH host key found in $etc/ssh"
+        return 0
+    fi
+    for pub in "$@"; do
+        key_type=""
+        if [ -r "$pub" ]; then
+            read -r key_type _rest < "$pub"
+        fi
         # shellcheck disable=SC2046
-        set -- $("$sshd" -T 2>/dev/null | grep "^port ")
-    fi
-    if [ "$#" -ge 2 ]; then
-        echo "$2"
-    fi
+        fingerprint="$(second_word $(ssh-keygen -l -E sha256 -f "$pub" 2>/dev/null))"
+        case "$fingerprint" in
+            SHA256:?*) ;;
+            *)
+                fail "ssh-keygen cannot read the host key $pub"
+                continue
+                ;;
+        esac
+        case "$key_type" in
+            "" | "#"*)
+                fail "no key type in the host key $pub"
+                continue
+                ;;
+        esac
+        host_keys="$host_keys    - type: $key_type$nl      fingerprint: $dq$fingerprint$dq$nl"
+    done
     return 0
 }
 
@@ -133,6 +240,8 @@ iface_type() {
 }
 
 # Print the interfaces list, one YAML block per interface except loopback.
+# The MAC address is quoted: unquoted, an address of decimal digits only,
+# such as 52:54:00:12:34:56, is a base 60 integer to a YAML 1.1 parser.
 list_interfaces() {
     set +f
     set -- "$sysfs"/class/net/*
@@ -180,7 +289,7 @@ list_interfaces() {
 
         echo "    - name: $dev"
         echo "      type: $(iface_type "$dev")"
-        echo "      mac: $mac"
+        echo "      mac: $dq$mac$dq"
         echo "      state: $state"
         echo "      default_route4: $route4"
         echo "      default_route6: $route6"
@@ -192,7 +301,8 @@ list_interfaces() {
 
 host="$(hostname)"
 timestamp="$(date --iso-8601=seconds)"
-machine_id="$(cat /etc/machine-id 2>/dev/null)"
+# Quoted for the same reason as the MAC address: a machine ID can be all digits.
+machine_id="$(cat "$etc/machine-id" 2>/dev/null)"
 
 if id -u "$user" >/dev/null 2>&1; then
     user_ok=true
@@ -221,7 +331,20 @@ else
     user_value=""
 fi
 
-ssh_port="$(sshd_port)"
+check_sudoers
+
+find_sshd_dump
+ssh_port="$(sshd_value port)"
+password_auth="$(sshd_value passwordauthentication)"
+kbd_auth="$(sshd_value kbdinteractiveauthentication)"
+ssh_password_auth=false
+if [ -z "$password_auth" ] || [ -z "$kbd_auth" ]; then
+    fail "cannot read passwordauthentication and kbdinteractiveauthentication from sshd -G or sshd -T"
+elif [ "$password_auth" = yes ] || [ "$kbd_auth" = yes ]; then
+    ssh_password_auth=true
+fi
+
+list_host_keys
 
 # The firewall manager is the first known manager that is running. When none
 # is running, it is the first one that is enabled.
@@ -252,14 +375,23 @@ fi
 
 interfaces="$(list_interfaces)"
 
+if [ "$failed" = true ]; then
+    echo "raw-node-report: not printed, because the values above could not be measured" >&2
+    exit 2
+fi
+
 echo "$host:"
 echo "  contract: $RAW_NODE_CONTRACT"
 echo "  baseline: $RAW_NODE_BASELINE"
 echo "  timestamp: $timestamp"
-echo "  machine_id: $machine_id"
+echo "  machine_id: $dq$machine_id$dq"
 echo "  user: $user_value"
 echo "  sudo: $has_sudo"
+echo "  sudo_nopasswd: $sudo_nopasswd"
 echo "  ssh_port: $ssh_port"
+echo "  ssh_password_auth: $ssh_password_auth"
+echo "  ssh_host_keys:"
+printf "%s" "$host_keys"
 echo "  firewall: $firewall"
 echo "  firewall_active: $firewall_active"
 echo "  python: $python"

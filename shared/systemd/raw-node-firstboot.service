@@ -2,9 +2,12 @@
 Description=Raw node first boot: hostname suffix and confirmation report
 Documentation=file:/usr/local/sbin/raw-node-firstboot
 Wants=network-online.target
-# cloud-init creates the initial user in its network stage, which is named
-# cloud-init.service on Ubuntu 24.04 and cloud-init-network.service on 26.04.
-After=network-online.target cloud-init.service cloud-init-network.service
+# cloud-init creates the initial user and the SSH host keys in its network
+# stage, which is named cloud-init.service on Ubuntu 24.04 and
+# cloud-init-network.service on 26.04. On Debian the host keys are created at
+# install time, and sshd-keygen.service only fills in missing ones at a first
+# boot. The report fails without a host key, so it must run after all three.
+After=network-online.target cloud-init.service cloud-init-network.service sshd-keygen.service
 ConditionPathExists=!/var/lib/raw-node/confirmation.yml
 
 [Service]

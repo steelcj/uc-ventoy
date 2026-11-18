@@ -1,7 +1,7 @@
 ---
 title: "Ventoy Automated Configuration for Ubuntu 26.04 Server"
-version: "0.3.0"
-date: 2026-11-15
+version: "0.4.0"
+date: 2026-11-17
 author: "Christopher Steel"
 status: "Draft, reviewed against current documentation, not yet tested in virtual machines"
 description: "Ubuntu Server 26.04 LTS autoinstall answer file that Ventoy delivers to Subiquity to produce the raw node defined in raw-node-baseline.md."
@@ -51,7 +51,7 @@ Some renderers, including GitHub, disable clicks inside Mermaid charts. The same
 
 Template: [`ubuntu/26.04/user-data.j2`](../../ubuntu/26.04/user-data.j2). `bin/build` renders it into `build/answer-files/ubuntu/26.04/user-data`, filling in the [inputs](raw-node-baseline.md#inputs) and embedding the [canonical files](raw-node-baseline.md#canonical-files).
 
-The `autoinstall` section sets locale, keyboard and time zone, keeps storage interactive, creates the initial user through `identity`, installs the OpenSSH server with the key and password authentication through `ssh`, and adds `nftables`, `python3` and `foomuuri`. Its `late-commands` write each canonical file with a quoted heredoc, set the root password, mask `nftables.service` and `ufw.service`, and enable `foomuuri.service` and `raw-node-firstboot.service`.
+The `autoinstall` section sets locale, keyboard and time zone, keeps storage interactive, creates the initial user through `identity`, installs the OpenSSH server with the key, and password authentication off, through `ssh`, and adds `nftables`, `python3` and `foomuuri`. Its `late-commands` write each canonical file with a quoted heredoc, set the root password, mask `nftables.service` and `ufw.service`, and enable `foomuuri.service` and `raw-node-firstboot.service`.
 
 ## Notes on the autoinstall file
 
@@ -61,12 +61,16 @@ The same reference explains the rest of the file:
 
 - Users in `identity` are created during installation, while users in `user-data` are created on first boot. Setting the root password in `late-commands` keeps it with the rest of the install.
 - A plain list under `identity.groups` replaces the default groups, which already include `sudo`. Omitting `groups` keeps the defaults.
-- `allow-pw` defaults to `false` when `authorized-keys` is present, so `allow-pw: true` must stay explicit.
+- `allow-pw` defaults to `false` when `authorized-keys` is present. It is set to `false` explicitly anyway, so the template states key-only SSH (contract RN-SSH-03) instead of relying on a default.
 - `authorized-keys` installs the key for the initial user, so no manual `authorized_keys` handling is needed.
 
 `hostname` exists only inside `identity`, and `identity` rejects any key it does not define <a id="cite-canonical-autoinstall-schema"></a>([Canonical, n.d.-b](#ref-canonical-autoinstall-schema)). Do not add a top-level `hostname`.
 
-The installer writes `/etc/ssh/sshd_config.d/50-cloud-init.conf` with its own `PasswordAuthentication` line <a id="cite-launchpad-2088207"></a>([Launchpad, 2024](#ref-launchpad-2088207)). Because Ubuntu includes `sshd_config.d/*.conf` at the top of `sshd_config` and `10-local-auth.conf` sorts first, the canonical drop-in wins, as RN-07 requires.
+The installer writes `/etc/ssh/sshd_config.d/50-cloud-init.conf` with its own `PasswordAuthentication` line <a id="cite-launchpad-2088207"></a>([Launchpad, 2024](#ref-launchpad-2088207)). Because Ubuntu includes `sshd_config.d/*.conf` at the top of `sshd_config` and `10-local-auth.conf` sorts first, the canonical drop-in wins, as RN-07 requires. Subiquity 26.04.1 passes `allow-pw` to cloud-init as `ssh_pwauth`, and cloud-init's `set_passwords` module turns `false` into `PasswordAuthentication no` in that file, so both files say `no`. Run against the raw node drop-ins with a `50-cloud-init.conf` that says `yes`, the `sshd -G` of `openssh-server` 1:10.2p1-2ubuntu3.8 still reports `passwordauthentication no` and `kbdinteractiveauthentication no`.
+
+cloud-init runs its user, SSH and password modules once, in its network stage, `cloud-init-network.service`, with cloud-init 26.2. Subiquity also has cloud-init write `/etc/cloud/cloud-init.disabled` at the end of the first boot, so no cloud-init module runs at a later boot and none can turn password login back on. In that stage cloud-init also deletes the SSH host keys made at install time and makes new ones. `raw-node-firstboot.service` is ordered after it, so the report lists the new keys.
+
+The initial user keeps its password for the console and for sudo, which asks for it. Subiquity passes the user to cloud-init with `lock_passwd: false` and without a `sudo` key, and without cloud-init's `default` user, so cloud-init writes no `/etc/sudoers.d/90-cloud-init-users` and creates no `ubuntu` user. sudo is sudo-rs 0.2.13-0ubuntu1.2. sudo-rs reads `/etc/sudoers-rs` when it exists and `/etc/sudoers` otherwise. No package ships `/etc/sudoers-rs`, and the `/etc/sudoers` from sudo-common 1.2ubuntu has no `NOPASSWD` or `!authenticate`.
 
 The answer file also writes `/etc/cloud/cloud.cfg.d/99-raw-node.cfg` with `preserve_hostname: true`, so that cloud-init does not reset the suffixed hostname that `raw-node-firstboot` sets.
 
@@ -85,7 +89,7 @@ The answer file also writes `/etc/systemd/system/foomuuri.service.d/10-raw-node.
 | RN-01 | `identity.hostname` set to `ub2604-vt`; suffix added by `raw-node-firstboot`; kept by `preserve_hostname` |
 | RN-02 | `locale`, `keyboard`, `timezone`; network time is enabled by default in Ubuntu Server |
 | RN-03 | `usermod --password` in `late-commands`; root SSH login refused by the drop-in |
-| RN-04 | `identity.username` and `identity.password`; default groups include `sudo` |
+| RN-04 | `identity.username` and `identity.password`, the hash from the Ansible controller; default groups include `sudo`; no sudoers rule written |
 | RN-05 | `ssh.authorized-keys` |
 | RN-06 | `ssh.install-server`; listening through `ssh.socket`, on the port `sshd-socket-generator` reads from `20-raw-node-port.conf` |
 | RN-07 | Heredocs write `/etc/ssh/sshd_config.d/10-local-auth.conf`, which sorts before `50-cloud-init.conf`, and `20-raw-node-port.conf` |
@@ -108,10 +112,14 @@ systemctl cat foomuuri
 cloud-init status --long
 journalctl -b | grep -i -E 'ordering cycle|deleted to break'
 ls /etc/ssh/sshd_config.d/
+cat /etc/ssh/sshd_config.d/50-cloud-init.conf
+ls /etc/sudoers.d/ /etc/cloud/cloud-init.disabled
+ls -la /etc/sudoers-rs
+id ubuntu
 hostnamectl --static
 ```
 
-`ssh.socket` should be active and enabled. `ssh.service` may show as inactive until the first connection arrives, which is expected with socket activation. When `ssh_port` is not 22, `systemctl cat ssh.socket` should show a generated drop-in with that port. `ufw` and `nftables` should both be `masked`. `foomuuri.service` should be active, and `systemctl cat foomuuri` should show the `10-raw-node.conf` drop-in. `cloud-init status` should report `done` without errors, and the journal search should print nothing. `10-local-auth.conf` should be listed before `20-raw-node-port.conf` and `50-cloud-init.conf`. The hostname should be `ub2604-vt-` followed by four hexadecimal digits, and should survive a reboot.
+`ssh.socket` should be active and enabled. `ssh.service` may show as inactive until the first connection arrives, which is expected with socket activation. When `ssh_port` is not 22, `systemctl cat ssh.socket` should show a generated drop-in with that port. `ufw` and `nftables` should both be `masked`. `foomuuri.service` should be active, and `systemctl cat foomuuri` should show the `10-raw-node.conf` drop-in. `cloud-init status` should report `done` without errors, and the journal search should print nothing. `10-local-auth.conf` should be listed before `20-raw-node-port.conf` and `50-cloud-init.conf`, and `50-cloud-init.conf` should say `PasswordAuthentication no`. `/etc/sudoers.d/` should hold only `README`, `/etc/cloud/cloud-init.disabled` should exist, `/etc/sudoers-rs` should not exist, and `id ubuntu` should report no such user. The hostname should be `ub2604-vt-` followed by four hexadecimal digits, and should survive a reboot.
 
 ## Review history
 
@@ -128,12 +136,19 @@ hostnamectl --static
 | First-boot report and `preserve_hostname` | Added in 0.3.0 | RN-12. |
 | Firewall | Replaced in 0.3.0 | Foomuuri with `/etc/foomuuri/00-raw-node.conf` instead of `/etc/nftables.conf`. `nftables.service` and `ufw.service` masked. Drop-in for `foomuuri.service`. |
 | SSH port | Added in 0.3.0 | `20-raw-node-port.conf`, from the `ssh_port` input. |
+| SSH password login | Removed in 0.4.0 | `allow-pw: false` and `PasswordAuthentication no`, for contract RN-SSH-03. |
 
 ## Qualification
 
 This is a reviewed configuration template, not yet a tested turnkey installer. Validate it in an Incus virtual machine before using it on physical hardware.
 
 ## Change log
+
+### 0.4.0, 2026-11-17
+
+- Key-only SSH: `allow-pw: false`, and `PasswordAuthentication no` and `PermitEmptyPasswords no` in the policy drop-in.
+- `identity.password` takes the batch hash from the Ansible controller, and `raw-node.conf` records the batch ID when `password_batch` is set.
+- The confirmation follows the raw node contract 0.3.0. See [contracts.md](contracts.md).
 
 ### 0.3.0, 2026-11-15
 

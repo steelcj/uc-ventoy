@@ -2,13 +2,29 @@
 # Copy this file to raw-node-input.yml and replace the four required values.
 # raw-node-input.yml is git-ignored because it holds password hashes.
 #
-# Hashes:  mkpasswd --method=sha-512   (package: whois)
-# Key:     the single line from your ~/.ssh/<key>.pub
+# root_password_hash:     yours. mkpasswd --method=sha-512   (package: whois)
+# initial_password_hash:  from the Ansible controller. scripts/new_raw_batch.py
+#                         in uc-controller makes the batch password, keeps it,
+#                         and prints a batch ID and this SHA-512 hash. The
+#                         password itself never comes here. Until that script
+#                         exists, see en/docs/contracts.md, "The initial
+#                         password", for making a batch by hand.
+# ssh_public_key:         the single line from your ~/.ssh/<key>.pub
+#
+# The initial password works at the console and for sudo. SSH accepts the
+# key only.
 
 root_password_hash: "$6$DUMMYSALT$DUMMYROOTHASH"
 initial_username: initial
 initial_password_hash: "$6$DUMMYSALT$DUMMYUSERHASH"
 ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY operator@workstation"
+
+# Optional. The batch ID the controller printed with initial_password_hash.
+# Written to /etc/raw-node/raw-node.conf as RAW_NODE_PASSWORD_BATCH, so that
+# at the console you can tell which batch password a node has. Letters,
+# digits, dots, hyphens and underscores, at most 64.
+
+#password_batch: "raw-2026-11-17-manual"
 
 # Optional. Both values shape the firewall and sshd on every raw node, and
 # the Ansible controller must be given the same values.
