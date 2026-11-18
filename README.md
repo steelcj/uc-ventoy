@@ -103,11 +103,27 @@ So to check a  `debian/13` iso download the `SHA256SUMS` and `SHA256SUMS.sign` f
 
 In my case I had an old ubuntu server iso `ubuntu-24.04.1-live-server-amd64.iso`and I am upgrading to the latest `ubuntu-24.04.5-live-server-amd64.iso`live server iso.
 
+#### If your updating an iso delete the current version
+
 ```bash
 # delete the old version on usb ventoy stick
 rm /media/initial/Ventoy/iso/ubuntu/24.04/ubuntu-24.04.1-live-server-amd64.iso
-# copy the updated version to my ventoy usb stick
-cp ~/iso/ubuntu/24.04/ubuntu-24.04.5-live-server-amd64.iso /media/initial/Ventoy/iso/ubuntu/24.04/
+```
+
+#### If you are adding a ISO file, ensure for your target directory structure
+
+```bash
+mkdir -p /media/initial/Ventoy/iso/ubuntu/24.04/
+mkdir -p /media/initial/Ventoy/iso/ubuntu/26.04/
+mkdir -p /media/initial/Ventoy/iso/debian/13/
+```
+
+#### Copy over your ISO files and checksum info
+
+```bash
+cp ~/iso/debian/13/* /media/initial/Ventoy/iso/debian/13/.
+cp ~/iso/ubuntu/24.04/* /media/initial/Ventoy/iso/ubuntu/24.04/.
+cp ~/iso/ubuntu/26.04/* /media/initial/Ventoy/iso/ubuntu/26.04/.
 ```
 
 ### Notes:
@@ -282,9 +298,8 @@ bin/build --stick /media/initial/Ventoy --dry-run
 Complex output example:
 
 ```bash
-warning: foomuuri not found, raw node firewall not checked (sudo apt install foomuuri)
+warning: foomuuri check needs root for its nftables check; check the raw node firewall once with: sudo bin/build --check-firewall-only
 Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
-warning: shellcheck not found, shared scripts not linted (sudo apt install shellcheck)
 Report: raw-node-report prints valid YAML with the contract 0.1.0 fields (3 interfaces on this workstation), self-test OK
 Targets:
   debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
@@ -295,15 +310,14 @@ Wrote build/answer-files/ and build/ventoy/ventoy.json
 
 ISOs on /media/initial/Ventoy:
   /iso/debian/13: debian-13.7.0-amd64-netinst.iso
-  /iso/ubuntu/24.04: ubuntu-24.04.2-live-server-amd64.iso
-  /iso/ubuntu/26.04: ubuntu-26.04-live-server-amd64.iso
+  /iso/ubuntu/24.04: ubuntu-24.04.5-live-server-amd64.iso
+  /iso/ubuntu/26.04: ubuntu-26.04.1-live-server-amd64.iso
 
 Stick: /media/initial/Ventoy
   would write answer-files/debian/13/preseed.cfg
   would write answer-files/ubuntu/24.04/user-data
   would write answer-files/ubuntu/26.04/user-data
-  would update ventoy/ventoy.json: 3 raw node entries, 0 other auto_install entries kept
-warning: /media/initial/Ventoy/answer-files/ventoy.json is ignored by Ventoy, which reads only ventoy/ventoy.json; consider removing it
+  would create ventoy/ventoy.json: 3 raw node entries, 0 other auto_install entries kept
 ```
 
 #### Dry run output notes:
@@ -364,6 +378,7 @@ Stick: /media/initial/Ventoy
   writing answer-files/ubuntu/26.04/user-data
   updating ventoy/ventoy.json: 3 raw node entries, 0 other auto_install entries kept
   backup: ventoy/ventoy.json.raw-node-backup-20261115-011245
+  written to the device and read back: OK
 warning: /media/initial/Ventoy/answer-files/ventoy.json is ignored by Ventoy, which reads only ventoy/ventoy.json; consider removing it
 ```
 
@@ -414,3 +429,12 @@ ISOs stay where they are, under `/iso/<distro>/<version>/`. Ventoy matches each 
 ## On the node
 
 At first boot, `raw-node-firstboot.service` appends the MAC suffix to the hostname (`deb13-vt` becomes `deb13-vt-a1b2`), writes `/var/lib/raw-node/confirmation.yml` in the format of the raw node contract, and shows it at the console login prompt. `sudo raw-node-report` prints it again at any time.
+
+## History
+
+Running the following command will give you an older working version of this project that works using nftables. Tested on Debian/13, configurations for Ubuntu 24.04 and 26.04 are likly to work as well but untested.
+
+```bash
+git worktree add ../uc-ventoy-baseline-0.2.0 baseline-0.2.0
+```
+

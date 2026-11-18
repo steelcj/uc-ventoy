@@ -31,6 +31,7 @@ Requires Python 3 with PyYAML and Jinja2:
 
 import argparse
 import datetime
+import errno
 import ipaddress
 import json
 import os
@@ -483,9 +484,73 @@ def check_isos(stick, targets, p):
         print(f"  /iso/{t['rel']}: {', '.join(i.name for i in isos)}")
 
 
+def stick_device_state(stick):
+    """Return (disk name, state) for the disk behind the stick, or None.
+
+    A USB stick that has dropped off the bus stays mounted. Listings and even
+    writes then succeed from memory while nothing reaches the device. The
+    kernel shows the truth in /sys: "running" for a SCSI or USB disk, "live"
+    for NVMe. None means the kernel publishes no state for this file system,
+    for example a plain folder on tmpfs.
+    """
+    dev = os.stat(stick).st_dev
+    try:
+        node = Path(f"/sys/dev/block/{os.major(dev)}:{os.minor(dev)}").resolve(strict=True)
+    except OSError:
+        return None
+    for disk in (node, node.parent):  # a whole disk, or a partition of one
+        state = disk / "device" / "state"
+        if state.is_file():
+            return disk.name, state.read_text().strip()
+    return None
+
+
+def check_stick_online(stick, p):
+    try:
+        found = stick_device_state(stick)
+    except OSError as e:
+        p.error(f"{stick}: cannot be read: {e}")
+        return
+    if found and found[1] not in ("running", "live"):
+        name, state = found
+        p.error(f"{stick}: the device {name} is {state}, not running. It is still mounted, but nothing "
+                f"read from it or written to it is real. Unmount it, unplug it, plug it in again, "
+                f"and look at: journalctl -k | grep {name}")
+
+
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        if e.errno not in (errno.EINVAL, errno.ENOSYS, errno.ENOTSUP):
+            raise  # those three mean "this file system cannot sync a folder"
+    finally:
+        os.close(fd)
+
+
+def write_through(dst, data):
+    """Write data to dst on the device itself, and fail when the device does.
+
+    fsync makes the kernel hand the data to the device and report its errors
+    here. The cached pages are then dropped, so the read back comes from the
+    device and not from memory.
+    """
+    with open(dst, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+        os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    fsync_dir(dst.parent)
+    if dst.read_bytes() != data:
+        raise OSError(errno.EIO, "the file read back from the device differs from what was written", str(dst))
+
+
 def install_on_stick(stick, targets, auto_install, dry_run, p):
-    if not (stick / "ventoy").is_dir():
-        p.error(f"{stick}: no ventoy/ folder; is this the Ventoy data partition?")
+    # Ventoy does not create ventoy/ itself, so a freshly prepared stick has none.
+    # Either folder is enough to tell the data partition from a mistyped path.
+    if not (stick / "ventoy").is_dir() and not (stick / "iso").is_dir():
+        p.error(f"{stick}: neither ventoy/ nor iso/ found; is this the Ventoy data partition?")
         p.report_and_exit_on_error()
     stray = stick / "answer-files" / "ventoy.json"
     if stray.exists():
@@ -508,20 +573,33 @@ def install_on_stick(stick, targets, auto_install, dry_run, p):
     for _, src, dst in actions:
         print(f"  {'would write' if dry_run else 'writing'} {dst.relative_to(stick)}")
     other = [k for k in existing if k != "auto_install"]
-    print(f"  {'would update' if dry_run else 'updating'} ventoy/ventoy.json: "
+    if vj.exists():
+        verb = "would update" if dry_run else "updating"
+    else:
+        verb = "would create" if dry_run else "creating"
+    print(f"  {verb} ventoy/ventoy.json: "
           f"{len(auto_install)} raw node entries, {len(kept)} other auto_install entries kept"
           + (f", other settings kept: {', '.join(other)}" if other else ""))
     if dry_run:
         return
-    for _, src, dst in actions:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
-    if vj.exists():
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = vj.with_name(f"ventoy.json.raw-node-backup-{stamp}")
-        shutil.copyfile(vj, backup)
-        print(f"  backup: {backup.relative_to(stick)}")
-    vj.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        for _, src, dst in actions:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            write_through(dst, src.read_bytes())
+        if vj.exists():
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup = vj.with_name(f"ventoy.json.raw-node-backup-{stamp}")
+            write_through(backup, vj.read_bytes())
+            print(f"  backup: {backup.relative_to(stick)}")
+        vj.parent.mkdir(exist_ok=True)
+        write_through(vj, (json.dumps(merged, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+    except OSError as e:
+        p.error(f"{stick}: writing failed: {e}. The stick is NOT complete. If it dropped off the bus, "
+                f"unmount it, unplug it, plug it in again, and look at: journalctl -k")
+        p.report_and_exit_on_error()
+    check_stick_online(stick, p)
+    p.report_and_exit_on_error()
+    print("  written to the device and read back: OK")
 
 
 def main():
@@ -589,6 +667,8 @@ def main():
 
     if args.stick:
         stick = args.stick.resolve()
+        check_stick_online(stick, p)
+        p.report_and_exit_on_error()
         print(f"\nISOs on {stick}:")
         check_isos(stick, targets, p)
         p.report_and_exit_on_error()
