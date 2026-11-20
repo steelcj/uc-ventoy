@@ -243,16 +243,15 @@ if your using a venv, activate it now.
 ### Run the build command
 
 ```bash
- bin/build
+bin/build
 ```
 
 Output example:
 
 ```bash
-warning: foomuuri not found, raw node firewall not checked (sudo apt install foomuuri)
+warning: foomuuri check needs root for its nftables check; check the raw node firewall once with: sudo bin/build --check-firewall-only
 Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
-warning: shellcheck not found, shared scripts not linted (sudo apt install shellcheck)
-Report: raw-node-report prints valid YAML with the contract 0.3.0 fields (3 interfaces on this workstation), self-test OK
+Report: raw-node-report prints valid YAML with the contract 0.3.0 fields (4 interfaces on this workstation), self-test OK
 Targets:
   debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
   ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 9 files embedded, self-test OK
@@ -306,7 +305,7 @@ Complex output example:
 ```bash
 warning: foomuuri check needs root for its nftables check; check the raw node firewall once with: sudo bin/build --check-firewall-only
 Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
-Report: raw-node-report prints valid YAML with the contract 0.3.0 fields (3 interfaces on this workstation), self-test OK
+Report: raw-node-report prints valid YAML with the contract 0.3.0 fields (4 interfaces on this workstation), self-test OK
 Targets:
   debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
   ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 9 files embedded, self-test OK
@@ -323,12 +322,12 @@ Stick: /media/initial/Ventoy
   would write answer-files/debian/13/preseed.cfg
   would write answer-files/ubuntu/24.04/user-data
   would write answer-files/ubuntu/26.04/user-data
-  would create ventoy/ventoy.json: 3 raw node entries, 0 other auto_install entries kept
+  would update ventoy/ventoy.json: 3 raw node entries, 0 other auto_install entries kept
 ```
 
 #### Dry run output notes:
 
-So you can see that it again reminds us of the `foomuuri` and `shellcheck` options for developers and strict CI and automation integrations.
+In the dry run output you will see that it again reminds us of the `foomuuri` and `shellcheck` options for developers and strict CI and automation integration.
 
 The other item of note is that it has identified a second ventoy.json file
 
@@ -362,10 +361,9 @@ bin/build --stick /media/initial/Ventoy
 Output example:
 
 ```bash
-warning: foomuuri not found, raw node firewall not checked (sudo apt install foomuuri)
+warning: foomuuri check needs root for its nftables check; check the raw node firewall once with: sudo bin/build --check-firewall-only
 Raw node firewall: SSH on port 22 from anywhere, not checked by nftables
-warning: shellcheck not found, shared scripts not linted (sudo apt install shellcheck)
-Report: raw-node-report prints valid YAML with the contract 0.3.0 fields (3 interfaces on this workstation), self-test OK
+Report: raw-node-report prints valid YAML with the contract 0.3.0 fields (4 interfaces on this workstation), self-test OK
 Targets:
   debian/13: preseed.cfg, hostname deb13-vt-xxxx, 7 files embedded, self-test OK
   ubuntu/24.04: user-data, hostname ub2404-vt-xxxx, 9 files embedded, self-test OK
@@ -376,25 +374,22 @@ Wrote build/answer-files/ and build/ventoy/ventoy.json
 ISOs on /media/initial/Ventoy:
   /iso/debian/13: debian-13.7.0-amd64-netinst.iso
   /iso/ubuntu/24.04: ubuntu-24.04.5-live-server-amd64.iso
-  /iso/ubuntu/26.04: ubuntu-26.04-live-server-amd64.iso
+  /iso/ubuntu/26.04: ubuntu-26.04.1-live-server-amd64.iso
 
 Stick: /media/initial/Ventoy
   writing answer-files/debian/13/preseed.cfg
   writing answer-files/ubuntu/24.04/user-data
   writing answer-files/ubuntu/26.04/user-data
   updating ventoy/ventoy.json: 3 raw node entries, 0 other auto_install entries kept
-  backup: ventoy/ventoy.json.raw-node-backup-20261115-011245
+  backup: ventoy/ventoy.json.raw-node-backup-20261117-221925
   written to the device and read back: OK
-warning: /media/initial/Ventoy/answer-files/ventoy.json is ignored by Ventoy, which reads only ventoy/ventoy.json; consider removing it
 ```
 
-In the output at the end you will notice the warning about a second ventoy.json that I have stored here:
+In the output at the end you will notice that your old ventoy.json has been backed up:
 
 ```bash
-ventoy/ventoy.json
+backup: ventoy/ventoy.json.raw-node-backup-20261117-221925
 ```
-
-It's an extra that I used when developing, I should clean it up or perhaps place it in a backup directory so I can use it as a "known good" in future development. I will leave it alone for the time being.
 
 ## Testing against real systems
 
@@ -402,21 +397,17 @@ Now I am ready to test my automated configuration against real hardware!!!
 
 On my local system
 
-* I will get out of all directories on my USB stick so that I can saftly remove it.
+* I will get out of all directories on my USB stick so that I can safely remove it.
 
 On my test system
 
 * Backup anything I want to save
-
 * Ensure that I have a physical network (cable) connection to my testing system
   * hardwiringwifi may work but since this is a new installer I what thing to go as quickly as possible so I am hard wiring via a network cable
-
 * Insert the Ventoy installer into a bootable USB port on the target system
 * Boot the system to the usb drive
   * On my old Sansung laptop I need to press F9 right after starting it. If you are not sure, check your hardware manual or the internet for instructions on booting to a usb stick on your hardwate.
-
 * Partitioning is not automated so for the Debian 13 installation I chose the LVM option and not (LUKS?) encryption as that requires a lot more work for allowing Ansible to complete my full configuration.
-* 
 
 ## Layout
 
